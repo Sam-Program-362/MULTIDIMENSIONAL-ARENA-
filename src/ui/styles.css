@@ -9,3 +9,48 @@ form { display: grid; gap: 18px; } section { border: 1px solid #292b39; border-r
 .arena-screen { position: fixed; inset: 0; overflow: hidden; touch-action: none; background: #171b2b; } .arena-screen canvas { display:block; } .leave { position:absolute; z-index:2; top:16px; left:16px; } /* Joystick placement tunables: preserve the horizontal inset while keeping the bottom at its base safe-area margin. */
 .joystick { --joystick-safe-margin: 24px; --joystick-horizontal-extra-margin: 32px; --joystick-vertical-extra-margin: 0px; position:absolute; z-index:2; bottom: calc(env(safe-area-inset-bottom, 0px) + var(--joystick-safe-margin) + var(--joystick-vertical-extra-margin)); left: calc(env(safe-area-inset-left, 0px) + var(--joystick-safe-margin) + var(--joystick-horizontal-extra-margin)); width:120px; height:120px; border:2px solid #b9adff88; border-radius:50%; background:#b9adff22; touch-action:none; } .stick { position:absolute; inset:0; margin:auto; width:50px; height:50px; border-radius:50%; background:#b9adff; pointer-events:none; } @media(max-width:380px){.joystick{--joystick-safe-margin:16px;width:100px;height:100px}.stick{width:46px;height:46px}} @media(max-height:430px){.joystick{--joystick-safe-margin:16px;width:108px;height:108px}.stick{width:46px;height:46px}}
 
+/* Combat controls are independent pointer targets, so a second touch can keep driving the joystick. */
+.combat-controls { position: absolute; z-index: 4; right: calc(env(safe-area-inset-right, 0px) + 18px); bottom: calc(env(safe-area-inset-bottom, 0px) + 18px); width: 174px; height: 184px; pointer-events: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.combat-button { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 72px; height: 72px; padding: 0; border: 2px solid #ffffff55; border-radius: 50%; color: #fff; background: #252a40e8; font-weight: 700; font-size: .82rem; line-height: 1; box-shadow: 0 5px 18px #0007; pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.combat-button kbd { margin-top: 5px; color: #aaaec4; font: 9px 'DM Mono', monospace; }
+.combat-button:hover:not(:disabled) { transform: none; }
+.combat-button.held { transform: scale(.93); border-color: #fff; filter: brightness(1.25); }
+.attack-button { right: 0; bottom: 96px; width: 80px; height: 80px; border-color: #ffb56baa; background: #6d3b32eb; }
+.block-button { left: 0; bottom: 2px; border-color: #62dda299; background: #245345eb; }
+.dodge-button { right: 0; bottom: 0; border-color: #69e7ff99; background: #254d65eb; }
+
+/* Temporary debug HUD. It has no simulation responsibilities and can be removed as one component. */
+.debug-combat-hud { position: absolute; z-index: 3; top: calc(env(safe-area-inset-top, 0px) + 14px); left: 50%; display: grid; grid-template-columns: minmax(126px, 210px) minmax(126px, 210px); gap: 10px; width: min(calc(100% - 176px), 430px); transform: translateX(-50%); pointer-events: none; font: 10px 'DM Mono', monospace; }
+.hud-fighter { min-width: 0; padding: 8px 9px; border: 1px solid #4c5068; border-radius: 7px; background: #111521d9; }
+.hud-fighter.defeated { opacity: .55; }
+.hud-label { display: flex; justify-content: space-between; gap: 7px; min-width: 0; color: #bbbcca; }
+.hud-label strong { overflow: hidden; color: #f2f0ff; text-overflow: ellipsis; white-space: nowrap; }
+.hud-label span:last-child { white-space: nowrap; }
+.stamina-label { margin-top: 5px; color: #85889b; font-size: 9px; }
+.meter { height: 6px; margin-top: 4px; overflow: hidden; border-radius: 99px; background: #05070cbb; }
+.meter i { display: block; width: 100%; height: 100%; transition: width 80ms linear; }
+.meter.health i { background: #ee6574; }
+.meter.stamina i { background: #62dda2; }
+
+.fight-result { position: absolute; z-index: 5; top: 50%; left: 50%; display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 190px; padding: 18px; border: 1px solid #9c8cff; border-radius: 10px; background: #11131deb; box-shadow: 0 16px 50px #000a; transform: translate(-50%, -50%); }
+.fight-result[hidden] { display: none; }
+.fight-result span { color: #9b99a9; font-size: .8rem; }
+.fight-result button { margin-top: 8px; }
+
+@media (max-width: 620px) {
+  .debug-combat-hud { top: calc(env(safe-area-inset-top, 0px) + 68px); grid-template-columns: 1fr; gap: 5px; width: min(56vw, 220px); }
+  .hud-fighter { padding: 6px 8px; }
+  .stamina-label { display: none; }
+  .meter.stamina { margin-top: 4px; }
+}
+@media (max-width: 380px) {
+  .combat-controls { right: calc(env(safe-area-inset-right, 0px) + 10px); bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); width: 156px; height: 166px; }
+  .combat-button { width: 64px; height: 64px; }
+  .attack-button { width: 72px; height: 72px; bottom: 88px; }
+}
+@media (max-height: 430px) {
+  .debug-combat-hud { top: calc(env(safe-area-inset-top, 0px) + 8px); grid-template-columns: minmax(115px, 180px) minmax(115px, 180px); width: min(calc(100% - 190px), 370px); }
+  .stamina-label { display: none; }
+  .combat-controls { bottom: calc(env(safe-area-inset-bottom, 0px) + 9px); height: 150px; transform: scale(.88); transform-origin: right bottom; }
+}
+

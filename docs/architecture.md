@@ -1,10 +1,11 @@
 # Architecture
 
-> **Future plan — none of the architecture described here is implemented.**
+The implemented foundation follows these principles:
 
-The planned architecture follows these principles:
+- `src/sim/` contains deterministic fighter generation, input mapping, arena movement, and combat rules without DOM/browser references.
+- `src/ui/` owns screens, browser input, the fixed-timestep render loop, and canvas presentation.
+- `src/storage/` owns the versioned local fighter-save adapter. Combat state is intentionally not saved.
+- Plain-data combat events connect simulation outcomes to temporary UI feedback without putting rules in the renderer.
+- Deterministic or seeded behavior is used where practical so simulation behavior can be reproduced and tested.
 
-- Keep the simulation core separate from the UI and from the narrator.
-- Treat persistent state as the source of truth.
-- Use an event-driven model for changes and reactions in the world.
-- Use deterministic or seeded randomness where practical, so simulation behavior can be reproduced and investigated.
+Persistent world state, narrator systems, actors/factions, backend services, and multiplayer architecture remain future work.
