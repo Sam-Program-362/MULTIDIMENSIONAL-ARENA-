@@ -1,7 +1,7 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation, deterministic generation, and local save/load implemented. Combat and world simulation remain planned.
+- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a and Phase 1b-i movement prototype implemented: deterministic fighter creation, local save/load, fixed timestep, bounds, and mobile controls. Combat remains planned.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)

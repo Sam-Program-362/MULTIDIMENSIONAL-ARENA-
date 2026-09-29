@@ -1,6 +1,6 @@
 # MULTIDIMENSIONAL ARENA
 
-MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1a is implemented:** create a fighter, save it locally, reload the page, and continue to its profile. Combat and the persistent world are planned, not built.
+MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1b-i is implemented:** create/save a fighter and move them in a fixed-timestep, touch-controlled 2.5D arena. Combat and the persistent world are planned, not built.
 
 ## Stack
 

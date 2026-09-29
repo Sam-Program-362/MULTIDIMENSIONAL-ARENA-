@@ -33,13 +33,16 @@ const requiredFields: (keyof FighterInput)[] = ['name', 'origin', 'species', 'ba
 const statKeys: (keyof HiddenStats)[] = ['health', 'stamina', 'reaction', 'skill', 'willpower'];
 const traitKeys: (keyof HiddenTraits)[] = ['aggression', 'fear', 'discipline', 'confidence', 'caution', 'patience', 'impulsiveness', 'adaptability', 'composure', 'riskTolerance'];
 
+const textLimits: Record<string, number> = { name: 40, origin: 60, species: 60, primaryStyle: 60, powerSystem: 60, background: 200 };
 export function validateFighterInput(input: FighterInput): void {
   if (!input || typeof input !== 'object') throw new Error('Fighter input is required.');
   for (const field of requiredFields) {
     if (typeof input[field] !== 'string' || input[field].trim().length === 0) throw new Error(`${field} is required.`);
   }
+  for (const [field, limit] of Object.entries(textLimits)) if ((input as unknown as Record<string, unknown>)[field] as string && (input as unknown as Record<string, string>)[field].length > limit) throw new Error(`${field} must be ${limit} characters or fewer.`);
   for (const field of ['secondaryStyles', 'weapons', 'equipment', 'specialAbilities'] as const) {
     if (!Array.isArray(input[field]) || input[field].some((value) => typeof value !== 'string')) throw new Error(`${field} must be a list.`);
+    if (input[field].some((value) => value.length > 60)) throw new Error(`${field} items must be 60 characters or fewer.`);
   }
 }
 
