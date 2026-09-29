@@ -1,14 +1,41 @@
 # MULTIDIMENSIONAL ARENA
 
-MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG in which the world reacts to the player rather than revolving around the player. The repository is currently at Phase 0, Project Foundation: it contains project documentation and repository safeguards only. No gameplay, simulation, UI, API, database, deployment configuration, or application runtime has been implemented.
+MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1a is implemented:** create a fighter, save it locally, reload the page, and continue to its profile. Combat and the persistent world are planned, not built.
 
-## Current status
+## Stack
 
-- **Phase:** 0 — Project Foundation (in progress)
-- **Detected stack:** None
-- **Runtime or framework:** None selected
-- **Database:** None configured; no Neon setup exists
-- **Deployment:** None configured; no Vercel setup exists
-- **Gameplay:** Not implemented
+- Vite + vanilla TypeScript
+- Vitest
+- Browser `localStorage` behind `src/storage/fighterStorage.ts`
 
-See [`docs/`](docs/) for the project vision, future architecture plan, roadmap, development log, and initial decision record.
+Only the runtime dependencies listed in `package.json` are used. Simulation code in `src/sim/` has no DOM or browser imports and is kept separate from `src/ui/`.
+
+## Install and run
+
+```sh
+npm install
+npm run dev
+```
+
+Open the local URL printed by Vite. The app is designed for mobile widths around 360px and up.
+
+```sh
+npm test       # run the Vitest suite
+npm run build  # type-check and create dist/
+```
+
+## Structure
+
+- `src/sim/` deterministic fighter model and generation logic
+- `src/ui/` DOM screens
+- `src/storage/` versioned local save adapter
+- `tests/` simulation, storage, and boundary tests
+
+## Deployment on Vercel
+
+- **Framework preset:** Vite
+- **Build command:** `npm run build`
+- **Output directory:** `dist`
+- **Install command:** `npm install` (default)
+
+No Vercel configuration file is required. Combat, movement, canvas/WebGL, AI, opponents, matchmaking, rank changes, economy logic, Neon/database, and multiplayer are planned for later phases.
