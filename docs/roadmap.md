@@ -1,7 +1,7 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b-i fixed-timestep arena movement, and Phase 1b-ii deterministic combat basics are implemented. The current training fight includes a stationary dummy, attack/block/dodge, health/stamina, mobile controls, and a debug HUD; it does not include AI, powers, progression, or combat persistence.
+- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b-i fixed-timestep arena movement, Phase 1b-ii deterministic combat basics, and Phase 1b-ii.1 stamina and attack-movement tuning are implemented. Stamina is now a defensive resource: basic attacks are sustainable, while blocking and dodging spend the bar. The current training fight includes a stationary dummy, attack/block/dodge, health/stamina, mobile controls, and a debug HUD; it does not include AI, powers, progression, or combat persistence.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)
