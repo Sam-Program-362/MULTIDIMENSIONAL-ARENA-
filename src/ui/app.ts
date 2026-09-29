@@ -1,4 +1,4 @@
-import { createFighter, describeCondition, Fighter, FighterInput, createArenaState, step, FIXED_DT } from '../sim';
+import { createFighter, describeCondition, Fighter, FighterInput, createArenaState, step, FIXED_DT, joystickInput, joystickKnobOffset } from '../sim';
 import { browserStorage } from '../storage';
 import './styles.css';
 
@@ -43,7 +43,20 @@ export function renderArena(): void {
   const canvas = root.querySelector('canvas')!; const ctx = canvas.getContext('2d')!; const pad = root.querySelector<HTMLElement>('#joystick')!; const stick = pad.querySelector<HTMLElement>('.stick')!;
   let state = createArenaState(); let accumulator = 0; let last = performance.now(); let input = { x: 0, z: 0 }; let frame = 0; let pointer: number | null = null;
   const resize = () => { canvas.width = innerWidth * devicePixelRatio; canvas.height = innerHeight * devicePixelRatio; canvas.style.width = `${innerWidth}px`; canvas.style.height = `${innerHeight}px`; ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); }; addEventListener('resize', resize); resize();
-  const updatePad = (e: PointerEvent) => { const r = pad.getBoundingClientRect(); const x = (e.clientX-r.left-r.width/2)/(r.width/2), y=(e.clientY-r.top-r.height/2)/(r.height/2); const l=Math.hypot(x,y), scale=Math.min(1,l); input={x: x*scale, z: y*scale}; stick.style.transform=`translate(${x*scale*35}px,${y*scale*35}px)`; }; const release=()=>{pointer=null;input={x:0,z:0};stick.style.transform='';}; pad.addEventListener('pointerdown',e=>{if(pointer===null){pointer=e.pointerId;pad.setPointerCapture(pointer);updatePad(e);}}); pad.addEventListener('pointermove',e=>{if(e.pointerId===pointer)updatePad(e)}); pad.addEventListener('pointerup',release); pad.addEventListener('pointercancel',release); addEventListener('keydown',e=>{const k=e.key.toLowerCase(); if('wasd'.includes(k)||['arrowup','arrowdown','arrowleft','arrowright'].includes(k)){e.preventDefault();input={x:(k==='d'||k==='arrowright'?1:k==='a'||k==='arrowleft'?-1:0),z:(k==='s'||k==='arrowdown'?1:k==='w'||k==='arrowup'?-1:0)}}}); addEventListener('keyup',()=>{input={x:0,z:0}});
+  // Joystick: the visible base circle is the source of truth for the full-speed radius.
+  const padGeometry = () => { const r = pad.getBoundingClientRect(); const baseRadius = r.width / 2; return { centerX: r.left + r.width / 2, centerY: r.top + r.height / 2, baseRadius, travel: Math.max(0, baseRadius - stick.offsetWidth / 2) }; };
+  const updatePad = (e: PointerEvent) => {
+    const { centerX, centerY, baseRadius, travel } = padGeometry();
+    const dx = e.clientX - centerX, dy = e.clientY - centerY;
+    input = joystickInput(dx, dy, baseRadius);
+    const knob = joystickKnobOffset(dx, dy, baseRadius, travel);
+    stick.style.transform = `translate(${knob.x}px, ${knob.y}px)`;
+  };
+  const release = (e?: PointerEvent) => { if (e && pointer !== null && e.pointerId !== pointer) return; pointer = null; input = { x: 0, z: 0 }; stick.style.transform = ''; };
+  pad.addEventListener('pointerdown', (e) => { if (pointer !== null) return; pointer = e.pointerId; pad.setPointerCapture(pointer); updatePad(e); });
+  pad.addEventListener('pointermove', (e) => { if (e.pointerId === pointer) updatePad(e); });
+  pad.addEventListener('pointerup', release); pad.addEventListener('pointercancel', release); pad.addEventListener('lostpointercapture', release);
+  addEventListener('keydown',e=>{const k=e.key.toLowerCase(); if('wasd'.includes(k)||['arrowup','arrowdown','arrowleft','arrowright'].includes(k)){e.preventDefault();input={x:(k==='d'||k==='arrowright'?1:k==='a'||k==='arrowleft'?-1:0),z:(k==='s'||k==='arrowdown'?1:k==='w'||k==='arrowup'?-1:0)}}}); addEventListener('keyup',()=>{input={x:0,z:0}});
   const draw=()=>{ctx.clearRect(0,0,innerWidth,innerHeight);ctx.fillStyle='#171b2b';ctx.fillRect(0,0,innerWidth,innerHeight);const sx=innerWidth/2, sy=innerHeight*.55, scale=Math.min(innerWidth/24,innerHeight/20);ctx.fillStyle='#303650';ctx.beginPath();ctx.moveTo(sx-10*scale,sy-7*scale);ctx.lineTo(sx+10*scale,sy-7*scale);ctx.lineTo(sx+10*scale,sy+7*scale);ctx.lineTo(sx-10*scale,sy+7*scale);ctx.fill();const px=sx+state.position.x*scale,pz=sy+state.position.z*scale*.6;ctx.fillStyle='#0008';ctx.beginPath();ctx.ellipse(px,pz+10,18,7,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#b9adff';ctx.beginPath();ctx.arc(px,pz,12,0,Math.PI*2);ctx.fill();}; const loop=(now:number)=>{const elapsed=Math.min(.25,(now-last)/1000);last=now;accumulator+=elapsed;const ticks=Math.min(5,Math.floor(accumulator/FIXED_DT));accumulator-=ticks*FIXED_DT;for(let i=0;i<ticks;i++)state=step(state,input);draw();frame=requestAnimationFrame(loop)}; frame=requestAnimationFrame(loop);
 }
 
