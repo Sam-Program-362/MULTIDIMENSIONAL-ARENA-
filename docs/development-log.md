@@ -1,5 +1,7 @@
 # Development Log
 
-## 2026-09-29 — Phase 0
+## 2026-09-29 — Phase 1a
 
-Inspected the repository and confirmed it contains only a minimal README at this stage. No runtime, framework, package manifest, lock file, source code, deployment configuration, database configuration, or environment-variable usage was found. Added baseline project documentation, the future architecture principles, the Phase 0–15 roadmap, the initial architectural decision record, and a `.gitignore` covering dependencies, environment files, and generated build output. No gameplay or application code was added.
+Inspected the docs-only repository and confirmed there was no package manifest, runtime, source code, or application stack. Added a Vite + TypeScript vanilla app with Vitest. Implemented the first vertical slice: deterministic seeded fighter generation, validation, a versioned localStorage adapter, a mobile-first creation flow, and a profile screen that intentionally hides internal stats and traits. Added tests for determinism, validation, persistence, corrupt saves, and the simulation/DOM boundary.
+
+Combat, movement, rendering/canvas, AI, opponents, economy logic, Neon, matchmaking, and progression changes remain planned and are not implemented.
