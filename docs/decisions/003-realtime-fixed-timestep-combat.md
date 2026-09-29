@@ -4,4 +4,4 @@
 - **Reason:** A fixed timestep makes combat behavior deterministic, testable, and consistent across rendering performance differences.
 - **Status:** Accepted
 - **Date:** 2026-09-29
-- **Status of implementation:** Planned; no combat, movement, rendering loop, or opponents are built in Phase 1a.
+- **Status of implementation:** Partly implemented in Phase 1b-i. The fixed timestep (60 ticks per second), the pure accumulator with capped catch-up, deterministic movement stepping, and a render loop that reads simulation state are built. Combat itself — attacks, blocking, dodging, stamina and health use, opponents, and AI — is still planned.

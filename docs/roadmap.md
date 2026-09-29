@@ -1,7 +1,10 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation, deterministic generation, and local save/load implemented. Combat and world simulation remain planned.
+- **Phase 1 — Simulation Foundations (in progress)**
+  - **Phase 1a (implemented)** — fighter creation, deterministic seeded generation, validation with text limits, local save/load with a structure-checked loader.
+  - **Phase 1b-i (implemented)** — real-time movement prototype: fixed-timestep loop at 60 ticks per second with capped catch-up, arena floor bounds, joystick and keyboard movement, and a 2.5D canvas view. No combat.
+  - **Phase 1b-ii and later (planned)** — attacks, blocking, dodging, stamina and health use, opponents, and AI.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)
