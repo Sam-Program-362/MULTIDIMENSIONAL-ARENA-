@@ -39,6 +39,14 @@ const BASIC_ATTACK_PROFILE: AttackProfile = {
 
 export type AttackProfileId = 'basic';
 
+/** Modifiers from conditions such as career injuries. Multipliers, defaults to 1. */
+export interface CombatModifiers {
+  maxHealth?: number;
+  maxStamina?: number;
+  moveSpeed?: number;
+  attackDamage?: number;
+}
+
 /** Every combat balance value lives here so timing and feel can be reviewed in one place. */
 export const COMBAT_TUNING = {
   tickRate: 60,
@@ -205,6 +213,12 @@ export interface CombatantState {
   staminaRegenDelay: number;
   inputBuffer: { attackTicks: number; dodgeTicks: number };
   stationary: boolean;
+  modifiers: {
+    maxHealth: number;
+    maxStamina: number;
+    moveSpeed: number;
+    attackDamage: number;
+  };
 }
 
 export interface CombatState {
@@ -299,16 +313,26 @@ export function createCombatantState(
   facing: Vec2,
   vitals: { maxHealth: number; maxStamina: number; maxEndurance: number },
   stationary = false,
+  modifiers: CombatModifiers = {},
 ): CombatantState {
+  const finalModifiers = {
+    maxHealth: modifiers.maxHealth ?? 1,
+    maxStamina: modifiers.maxStamina ?? 1,
+    moveSpeed: modifiers.moveSpeed ?? 1,
+    attackDamage: modifiers.attackDamage ?? 1,
+  };
+  const effectiveMaxHealth = Math.round(vitals.maxHealth * finalModifiers.maxHealth);
+  const effectiveMaxStamina = Math.round(vitals.maxStamina * finalModifiers.maxStamina);
+
   return {
     id,
     position: { ...position },
     velocity: { x: 0, z: 0 },
     facing: normalize(facing, { x: 0, z: 1 }),
-    health: vitals.maxHealth,
-    maxHealth: vitals.maxHealth,
-    stamina: vitals.maxStamina,
-    maxStamina: vitals.maxStamina,
+    health: effectiveMaxHealth,
+    maxHealth: effectiveMaxHealth,
+    stamina: effectiveMaxStamina,
+    maxStamina: effectiveMaxStamina,
     endurance: vitals.maxEndurance,
     maxEndurance: vitals.maxEndurance,
     enduranceRegenDelay: 0,
@@ -330,10 +354,14 @@ export function createCombatantState(
     staminaRegenDelay: 0,
     inputBuffer: { attackTicks: 0, dodgeTicks: 0 },
     stationary,
+    modifiers: finalModifiers,
   };
 }
 
-export function createCombatState(hiddenStats: HiddenStats = baselineStats()): CombatState {
+export function createCombatState(
+  hiddenStats: HiddenStats = baselineStats(),
+  modifiers?: CombatModifiers,
+): CombatState {
   const playerVitals = deriveCombatVitals(hiddenStats);
   const dummyVitals = deriveCombatVitals(baselineStats());
   return {
@@ -343,6 +371,8 @@ export function createCombatState(hiddenStats: HiddenStats = baselineStats()): C
       COMBAT_TUNING.initial.playerPosition,
       COMBAT_TUNING.initial.playerFacing,
       playerVitals,
+      false,
+      modifiers,
     ),
     dummy: createCombatantState(
       'dummy',
@@ -362,8 +392,11 @@ export function createCombatState(hiddenStats: HiddenStats = baselineStats()): C
  * The second combatant keeps the dummy's start position and neutral-stat derived vitals, but is
  * mobile and therefore obeys the same movement/action rules as the player once given input.
  */
-export function createOpponentCombatState(hiddenStats: HiddenStats = baselineStats()): CombatState {
-  const state = createCombatState(hiddenStats);
+export function createOpponentCombatState(
+  hiddenStats: HiddenStats = baselineStats(),
+  modifiers?: CombatModifiers,
+): CombatState {
+  const state = createCombatState(hiddenStats, modifiers);
   state.dummy.stationary = false;
   return state;
 }
@@ -377,6 +410,7 @@ function cloneCombatant(source: CombatantState): CombatantState {
     currentAction: { ...source.currentAction },
     actionDirection: { ...source.actionDirection },
     inputBuffer: { ...source.inputBuffer },
+    modifiers: { ...source.modifiers },
   };
 }
 
@@ -552,7 +586,8 @@ function moveCombatant(actor: CombatantState, input: CombatInput, bounds: Combat
     direction = normalize(raw);
     const lowStamina = actor.stamina / actor.maxStamina <= COMBAT_TUNING.lowStaminaThreshold;
     speed = COMBAT_TUNING.movementSpeed * magnitude * movementMultiplier(actor)
-      * (lowStamina ? COMBAT_TUNING.lowStaminaMovementMultiplier : 1);
+      * (lowStamina ? COMBAT_TUNING.lowStaminaMovementMultiplier : 1)
+      * actor.modifiers.moveSpeed;
   }
 
   const oldPosition = actor.position;
@@ -675,7 +710,7 @@ function resolveAttack(attacker: CombatantState, target: CombatantState, events:
       && target.currentAction.phase === 'active'
       && incomingFromFront;
     const lowStamina = attacker.stamina / attacker.maxStamina <= COMBAT_TUNING.lowStaminaThreshold;
-    const baseDamage = profile.damage * (lowStamina ? profile.lowStaminaDamageMultiplier : 1);
+    const baseDamage = profile.damage * (lowStamina ? profile.lowStaminaDamageMultiplier : 1) * attacker.modifiers.attackDamage;
 
     if (blocking) {
       const block = COMBAT_TUNING.block;

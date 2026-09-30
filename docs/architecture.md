@@ -2,13 +2,17 @@
 
 The implemented foundation follows these principles:
 
-- `src/sim/` contains deterministic fighter generation, input mapping, arena movement, combat rules, and the Rookie and Veteran AI tiers without DOM/browser references.
-- `src/sim/ai.ts` converts delayed observations into the same `CombatInput` used by the player. Its target history and serializable seeded-RNG state are plain data; `stepCombatWithAi` sends the result through the shared pair-combat step.
-- Combatant resources are separated by role: health, **stamina** (attacks and dodges), **endurance** (blocked hits only, with guard break at zero and no regeneration while Block is held), and **exposure** (an anti-spam meter applied to the attacker as attacks resolve). A broken guard staggers for 40 ticks, ends at zero endurance, waits 30 additional ticks, then regenerates gradually. Exposure rises on whiffed and blocked swings, barely on clean hits, and waits 60 ticks after a gain before decaying at 0.25 per tick; at maximum the fighter is **Exposed** for a fixed window during which block cannot be raised and incoming health damage scales proportionally with target exposure, after which exposure resets to a fraction of maximum. All resources live on the same generic combatant shape used by the player, the dummy, and the AI opponent; health/stamina/endurance are derived and bounded in `deriveCombatVitals`, and exposure tuning is `COMBAT_TUNING.exposure`. See decisions 008 and 009. Veteran habit history is per-fight plain data, and all target reads remain delayed public snapshots.
-- Attack numbers live in an `AttackProfile` (`COMBAT_TUNING.attackProfiles.basic`). Combat reads them through `attackProfileOf(actor)` using the combatant's `attackProfileId`, so per-weapon profiles can be added later without touching combat code. A per-attack `minIntervalTicks` gates only attacks; block, dodge, and movement are unaffected.
-- `src/ui/` owns screens, browser input, the fixed-timestep render loop, the Dummy/Rookie/Veteran session toggle, and canvas presentation.
-- `src/storage/` owns the versioned local fighter-save adapter. Combat and AI state are intentionally not saved.
-- Plain-data combat events connect simulation outcomes to temporary UI feedback without putting rules in the renderer.
-- Deterministic or seeded behavior is used where practical so complete fights can be reproduced and tested.
+- `src/sim/` contains deterministic fighter generation, input mapping, arena movement, combat rules, the Rookie and Veteran AI tiers, day counting, injury calculations, clinic actions, opponent temperaments, grudge/revenge logic, and aftermath text without DOM/browser references.
+- `src/sim/combat.ts` implements fixed-timestep pair combat. Combatant resources include health, **stamina** (attacks and dodges), **endurance** (blocked hits only, with guard break at zero), and **exposure** (anti-spam meter). Combatants accept optional `modifiers` (`maxHealth`, `maxStamina`, `moveSpeed`, `attackDamage`) that apply injury penalties in official bouts while keeping Training Room sparring unmodified.
+- `src/sim/career.ts` drives career loop progression:
+  - Day counter starting at 1, advanced by match settlements and `restDay(state)`.
+  - Structured injuries (`head`, `ribs`, `arm`, `leg`) with healing (`0.5` untreated, `1.0` treated per day), area penalties capped at `0.40`, and severe injury gating for paid bouts.
+  - Medical Clinic pure functions (`applyBasicCare`, `applyPremiumTreatment`).
+  - Opponent roster with immutable temperaments (`professional`, `brutal`, `ruthless`).
+  - Grudge tracking and dynamic Revenge bout offers (1.5x purse, +1 extra rank point, +25 bounty).
+  - Deterministic pure aftermath lines (`aftermathLines`).
+- `src/ui/` owns screens, browser input, the fixed-timestep render loop, Hub, Clinic, Find Match, Match Result, History, Profile, and canvas presentation.
+- `src/storage/` owns the versioned local save adapter (Save Schema v3), defensively migrating v1 and v2 data while preserving old keys.
+- Plain-data combat events and match settlement results connect simulation outcomes to UI presentation without putting business rules in the renderer.
 
-Heavy attacks, a weapon/equipment system, parry or perfect block, hit-stop, adaptive learning across fights, AI personalities, feints, multiple opponents, fight rewards, persistent world state, narrator systems, actors/factions, backend services, and multiplayer architecture are **planned only** and remain future work.
+Equipment loot/loss, Permanent Death execution/spare choices, daily living costs, and housing effects remain **planned only**.

@@ -1,12 +1,14 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b fixed-timestep movement and tuned deterministic combat basics, and Phase 1c's first seeded Rookie opponent are implemented. Phase 1c.1 added endurance (the guard resource), guard breaks, a per-attack minimum interval, and AI guard/punish/dash behavior. Phase 1c.2 added block auto-facing, empty delayed guard recovery, and the 28-tick interval. Phase 1c.4 reworks Exposure as a proportional, delayed-decay anti-spam meter (whiffed/blocked swings build exposure, clean hits barely do, and at full exposure the guard drops and damage taken is ×1.75) with Rookie punish/restraint hooks, and reverted the Rookie to the 1c.1 approach/hold/punish/dash controller while keeping the 1c.2 combat rules. Stamina pays for attacks and dodges; endurance absorbs blocked hits and breaks the guard when it empties; exposure penalizes repeated non-connecting offense. Phase 1c.5 lowers whiff/blocked Exposure to 30/35, pauses endurance regeneration while Block is held, and adds an opt-in deterministic Veteran with Pressure, Rhythm Break, Counter-Guard, Desperation, and Kill Instinct patterns. The session-only fight switches among Dummy, Rookie, and Veteran; every tier uses shared combat rules and delayed public target state.
+- **Phase 1 — Simulation Foundations (complete)** — Realtime fixed-timestep movement, symmetric combat rules (attack, block, dodge, stagger), stamina, endurance guard resource, exposure anti-spam mechanics, and deterministic Rookie and Veteran AI tiers.
+- **Phase 6a — Career Loop Slice 1 (complete)** — Hub, offers (Open Ring, Rookie, Veteran), Arena Lock, match settlement, result screen, history, rank progression, and save schema v2.
+- **Phase 6b — Career Loop Slice 2 (complete)** — Day counter, structured injuries, medical clinic, opponent temperaments (professional, brutal, ruthless), grudges with high-stakes Revenge bouts, deterministic aftermath text, and save schema v3 migration.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)
-- Phase 5 — Expanded Combat Simulation (planned; adaptive AI, personalities, multiple opponents, powers, and deeper combat on the implemented fixed-timestep prototype)
-- Phase 6 — Progression and Consequences (planned)
+- Phase 5 — Expanded Combat Simulation (planned; weapons, equipment profiles, powers, multi-opponent duels)
+- Phase 6c — Career Loop Slice 3 (planned; Permanent Death choices, equipment loot/loss, daily living costs, housing effects)
 - Phase 7 — Narrator Layer (planned)
 - Phase 8 — Player Interface (planned)
 - Phase 9 — Persistence and Recovery (planned)
@@ -15,16 +17,13 @@
 - Phase 12 — Observability and Balancing (planned)
 - Phase 13 — Deployment and Operations (planned)
 - Phase 14 — Testing and Hardening (planned)
-- Phase 15 — Release and Live Evolution (planned)
+- Phase 15 — Live Evolution (planned)
 
 ## Planned future ideas — not built
 
-- Spacing / engagement-cycle AI (edge-distance baiting, plans) — prototyped in 1c.2 and removed in 1c.3.
-- Adaptive learning across fights and behavior based on personalities/traits (Veteran habits reset every fight).
-- Feints.
-- Multiple simultaneous opponents.
-- Fight rewards or progression consequences.
-- A Heavy attack button.
-- A weapon/equipment system supplying per-weapon attack profiles.
-- Parry / perfect block and hit-stop.
-- An optional button that frees movement from auto-facing.
+- Post-revenge fight choices (kill, injure badly, rob completely, spare).
+- Equipment loot, durability, and loss.
+- Permanent Death / death rolls.
+- Host intervention delays in underground bouts.
+- Housing tiers and daily living upkeep.
+- Weapons system with modular attack profiles.

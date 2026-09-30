@@ -2,6 +2,25 @@ import { createRng } from './rng';
 
 export const FIGHTER_SCHEMA_VERSION = 1;
 
+export type InjuryArea = 'head' | 'ribs' | 'arm' | 'leg';
+export type InjurySeverity = 'minor' | 'moderate' | 'severe';
+
+export interface Injury {
+  id: string;
+  area: InjuryArea;
+  name: string;
+  severity: InjurySeverity;
+  daysRemaining: number;
+  treated: boolean;
+  sourceOpponentId?: string;
+  day: number;
+}
+
+export interface FighterCondition {
+  injuries: Injury[];
+  scars: string[];
+}
+
 export interface FighterInput {
   name: string;
   origin: string;
@@ -17,15 +36,40 @@ export interface FighterInput {
   undergroundAccess?: boolean;
 }
 
-export interface HiddenStats { health: number; stamina: number; reaction: number; skill: number; willpower: number; }
-export interface HiddenTraits { aggression: number; fear: number; discipline: number; confidence: number; caution: number; patience: number; impulsiveness: number; adaptability: number; composure: number; riskTolerance: number; }
+export interface HiddenStats {
+  health: number;
+  stamina: number;
+  reaction: number;
+  skill: number;
+  willpower: number;
+}
+
+export interface HiddenTraits {
+  aggression: number;
+  fear: number;
+  discipline: number;
+  confidence: number;
+  caution: number;
+  patience: number;
+  impulsiveness: number;
+  adaptability: number;
+  composure: number;
+  riskTolerance: number;
+}
+
 export interface Fighter extends FighterInput {
   permanentDeath: boolean;
   undergroundAccess: boolean;
   hiddenStats: HiddenStats;
   hiddenTraits: HiddenTraits;
-  progression: { rank: 'Rookie' | 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Elite' | 'Champion'; reputation: 'Unknown' | string; titles: string[]; currency: number; housing: string };
-  condition: { injuries: string[]; scars: string[] };
+  progression: {
+    rank: 'Rookie' | 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Elite' | 'Champion';
+    reputation: 'Unknown' | string;
+    titles: string[];
+    currency: number;
+    housing: string;
+  };
+  condition: FighterCondition;
   meta: { id: string; schemaVersion: number; createdAt: string; seed: number };
 }
 
@@ -34,15 +78,24 @@ const statKeys: (keyof HiddenStats)[] = ['health', 'stamina', 'reaction', 'skill
 const traitKeys: (keyof HiddenTraits)[] = ['aggression', 'fear', 'discipline', 'confidence', 'caution', 'patience', 'impulsiveness', 'adaptability', 'composure', 'riskTolerance'];
 
 const textLimits: Record<string, number> = { name: 40, origin: 60, species: 60, primaryStyle: 60, powerSystem: 60, background: 200 };
+
 export function validateFighterInput(input: FighterInput): void {
   if (!input || typeof input !== 'object') throw new Error('Fighter input is required.');
   for (const field of requiredFields) {
     if (typeof input[field] !== 'string' || input[field].trim().length === 0) throw new Error(`${field} is required.`);
   }
-  for (const [field, limit] of Object.entries(textLimits)) if ((input as unknown as Record<string, unknown>)[field] as string && (input as unknown as Record<string, string>)[field].length > limit) throw new Error(`${field} must be ${limit} characters or fewer.`);
+  for (const [field, limit] of Object.entries(textLimits)) {
+    if ((input as unknown as Record<string, unknown>)[field] as string && (input as unknown as Record<string, string>)[field].length > limit) {
+      throw new Error(`${field} must be ${limit} characters or fewer.`);
+    }
+  }
   for (const field of ['secondaryStyles', 'weapons', 'equipment', 'specialAbilities'] as const) {
-    if (!Array.isArray(input[field]) || input[field].some((value) => typeof value !== 'string')) throw new Error(`${field} must be a list.`);
-    if (input[field].some((value) => value.length > 60)) throw new Error(`${field} items must be 60 characters or fewer.`);
+    if (!Array.isArray(input[field]) || input[field].some((value) => typeof value !== 'string')) {
+      throw new Error(`${field} must be a list.`);
+    }
+    if (input[field].some((value) => value.length > 60)) {
+      throw new Error(`${field} items must be 60 characters or fewer.`);
+    }
   }
 }
 
@@ -71,8 +124,23 @@ export function createFighter(input: FighterInput, seed: number): Fighter {
 }
 
 export function describeCondition(fighter: Pick<Fighter, 'condition' | 'hiddenStats'>): string {
-  if (fighter.condition.injuries.length > 0) return fighter.condition.injuries.length === 1 ? 'Recovering' : 'Badly hurt';
-  if (fighter.condition.scars.length > 0) return 'Weathered';
+  const injuries = fighter.condition?.injuries ?? [];
+  if (injuries.length > 0) {
+    const hasSevere = injuries.some((i) => i.severity === 'severe');
+    const totalSeverityScore = injuries.reduce(
+      (sum, i) => sum + (i.severity === 'severe' ? 3 : i.severity === 'moderate' ? 2 : 1),
+      0,
+    );
+    if (hasSevere || totalSeverityScore >= 3) {
+      return 'Badly injured';
+    }
+    if (injuries.some((i) => i.severity === 'moderate') || injuries.length >= 2) {
+      return 'Injured';
+    }
+    return 'Bruised';
+  }
+  if (fighter.condition?.scars && fighter.condition.scars.length > 0) return 'Weathered';
+  if (!fighter.hiddenStats) return 'Steady';
   const average = Object.values(fighter.hiddenStats).reduce((sum, value) => sum + value, 0) / 5;
   return average >= 70 ? 'Ready' : average >= 55 ? 'Steady' : 'Fresh';
 }
