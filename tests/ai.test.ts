@@ -298,6 +298,26 @@ describe('rookie AI perception and behavior', () => {
   });
 });
 
+describe('rookie AI engagement cycle', () => {
+  it('does not press attack while its own public cooldown remains', () => {
+    const state = createOpponentCombatState();
+    state.dummy.attackCooldownRemaining = 7;
+    const forced = profile({ decisionIntervalTicks: 1, aggression: 1, mistakeChance: 0, guardChance: 0 });
+    const result = decide(createAiState(44, state.player, forced), aiObservation(state, state.dummy, state.player), 0, forced);
+    expect(result.input.attackPressed).toBe(false);
+  });
+
+  it('keeps the default target edge outside basic attack reach while the target is idle', () => {
+    const state = createOpponentCombatState();
+    state.dummy.position = { x: 3, z: 0 };
+    state.player.position = { x: 0, z: 0 };
+    const forced = profile({ decisionIntervalTicks: 1, aggression: 0, guardChance: 0, mistakeChance: 0 });
+    const result = decide(createAiState(45, state.player, forced), aiObservation(state, state.dummy, state.player), 0, forced);
+    expect(result.input.attackPressed).toBe(false);
+    expect(result.nextAiState.plan).toBe('approach');
+  });
+});
+
 describe('AI fight determinism and lifecycle', () => {
   it('replays identical combat states, AI states, inputs, and events for one seed and input sequence', () => {
     const inputs = Array.from({ length: 420 }, (_, tick) => neutral({
