@@ -523,21 +523,40 @@ describe('endurance and guard break', () => {
     expect(second.state.dummy.health).toBeCloseTo(health - COMBAT_TUNING.attack.damage, 10);
   });
 
-  it('waits the regen delay after a blocked hit and then regenerates per tick, held or not', () => {
-    for (const blockHeld of [true, false]) {
-      const state = blockingSetup();
-      let current = pairStep(state, { blockHeld: true }).state;
-      const drained = current.dummy.endurance;
-      current.player.position = { x: -9, z: -6 };
-      for (let index = 1; index < COMBAT_TUNING.block.enduranceRegenDelayTicks; index += 1) {
-        current = pairStep(current, { blockHeld }).state;
-        expect(current.dummy.endurance).toBe(drained);
-      }
-      current = pairStep(current, { blockHeld }).state;
-      expect(current.dummy.endurance).toBeCloseTo(drained + COMBAT_TUNING.block.enduranceRegenPerTick, 10);
-      current = pairStep(current, { blockHeld }).state;
-      expect(current.dummy.endurance).toBeCloseTo(drained + COMBAT_TUNING.block.enduranceRegenPerTick * 2, 10);
+  it('does not regenerate endurance or consume its delay while Block is held', () => {
+    const state = blockingSetup();
+    let current = pairStep(state, { blockHeld: true }).state;
+    const drained = current.dummy.endurance;
+    const delay = current.dummy.enduranceRegenDelay;
+    current.player.position = { x: -9, z: -6 };
+    current = runTicksPair(current, COMBAT_TUNING.block.enduranceRegenDelayTicks * 2, { blockHeld: true });
+    expect(current.dummy.endurance).toBe(drained);
+    expect(current.dummy.enduranceRegenDelay).toBe(delay);
+  });
+
+  it('regenerates only after Block ends and the full blocked-hit delay elapses', () => {
+    const state = blockingSetup();
+    let current = pairStep(state, { blockHeld: true }).state;
+    const drained = current.dummy.endurance;
+    current.player.position = { x: -9, z: -6 };
+    for (let index = 0; index < COMBAT_TUNING.block.enduranceRegenDelayTicks; index += 1) {
+      current = pairStep(current, { blockHeld: false }).state;
+      expect(current.dummy.endurance).toBe(drained);
     }
+    current = pairStep(current, { blockHeld: false }).state;
+    expect(current.dummy.endurance).toBeCloseTo(drained + COMBAT_TUNING.block.enduranceRegenPerTick, 10);
+  });
+
+  it('cannot exploit a short Block release to run down the regen delay', () => {
+    const state = blockingSetup();
+    let current = pairStep(state, { blockHeld: true }).state;
+    const drained = current.dummy.endurance;
+    current.player.position = { x: -9, z: -6 };
+    current = runTicksPair(current, 5, { blockHeld: false });
+    const remaining = current.dummy.enduranceRegenDelay;
+    current = runTicksPair(current, 90, { blockHeld: true });
+    expect(current.dummy.endurance).toBe(drained);
+    expect(current.dummy.enduranceRegenDelay).toBe(remaining);
   });
 
   it('restarts the regen delay on every consecutive blocked hit', () => {

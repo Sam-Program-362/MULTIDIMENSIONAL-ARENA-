@@ -12,9 +12,13 @@ Every combatant carries an **Exposure** meter (`0..maxExposure`, default `maxExp
 
 Exposure is applied to the **attacker** when an attack resolves, by outcome:
 
-- **Whiff** (missed swing, including a swing the target dodge-evaded): `+whiffExposure` (45).
-- **Blocked**: `+blockedExposure` (45).
-- **Clean hit**: `+hitExposure` (10).
+- **Whiff** (missed swing, including a swing the target dodge-evaded): `+whiffExposure` (**30**).
+- **Blocked**: `+blockedExposure` (**35**).
+- **Clean hit**: `+hitExposure` (**5**).
+
+Phase 1c.5 lowered whiffs from 45 to 30 and blocked swings from 40 to 35 after phone playtesting:
+one miss now fills less than one third of the bar, while four rapid misses or three blocked swings
+still cross the cap. Clean-hit tuning, decay timing, and the Exposed consequence are unchanged.
 
 After each gain, exposure is held for `decayDelayTicks` (60) ticks. It then decays at `decayPerTick` (0.25) per tick; each new gain restarts the delay. Because a clean, connecting hit adds less than the decay over one attack interval, an attacker who keeps landing hits never builds toward Exposed; an attacker who keeps whiffing or getting blocked does.
 
@@ -30,7 +34,7 @@ New plain-data events: `EXPOSED_STARTED` and `EXPOSED_ENDED`. `DAMAGE_APPLIED` a
 
 ### Final tuning
 
-`COMBAT_TUNING.exposure = { maxExposure: 100, whiffExposure: 45, blockedExposure: 45, hitExposure: 10, decayPerTick: 0.45, exposedTicks: 75, exposedDamageMultiplier: 1.75, exposedResetRatio: 0.25 }`.
+`COMBAT_TUNING.exposure = { maxExposure: 100, whiffExposure: 30, blockedExposure: 35, hitExposure: 5, decayDelayTicks: 60, decayPerTick: 0.25, exposedTicks: 75, exposureDamageBonus: 0.75, exposedResetRatio: 0.25 }`.
 
 ## Rookie behavior
 

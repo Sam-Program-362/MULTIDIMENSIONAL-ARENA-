@@ -1,6 +1,6 @@
 # 006 — Endurance, attack interval, and AI anticipation
 
-Status: accepted (Phase 1c.1)
+Status: accepted (Phase 1c.1; endurance regeneration amended in Phase 1c.5)
 
 ## Context
 
@@ -20,7 +20,7 @@ Landscape phone playtesting of Phase 1c surfaced three problems:
 | Resource | Spent by | Regenerates | Failure state |
 | --- | --- | --- | --- |
 | **Stamina** | attacks (5), dodges (10) | 0.30/tick, continuous; paused only while block is held/active and during a dodge | actions simply cannot start |
-| **Endurance** | blocked hits only (`damage * enduranceDrainPerDamage`) | 0.30/tick, but only after `enduranceRegenDelayTicks` (45) with no blocked hit; runs whether or not block is held | **guard break** |
+| **Endurance** | blocked hits only (`damage * enduranceDrainPerDamage`) | 0.30/tick, but only while Block is released and after `enduranceRegenDelayTicks` (45) with no blocked hit | **guard break** |
 
 `maxEndurance` is derived in `deriveCombatVitals` from the hidden stamina stat (primary, 0.2) and
 hidden willpower (secondary, 0.05, deliberately small) around a base of 100, clamped to 90..110 —
@@ -30,8 +30,10 @@ the same shape and bounded output as health and stamina.
 
 - A frontal blocked hit (inside `block.facingArcDegrees`) deals `damage * blockChipFraction`
   health damage — **0 by default** — and drains `damage * enduranceDrainPerDamage` endurance.
-- Blocking no longer costs stamina per hit. Stamina regen is still paused while Block is held,
-  blocking still slows movement, and a hit from behind is still not blocked (and drains nothing).
+- Blocking no longer costs stamina per hit. Stamina **and endurance** regeneration are paused while
+  Block is held (startup or active). A blocked hit restarts the 45-tick endurance delay; that delay
+  itself pauses until Block is released, so briefly releasing and re-holding cannot create free
+  recovery. Blocking still slows movement, and a hit from behind is not blocked (and drains nothing).
 - `ATTACK_BLOCKED` carries the chip `amount`, the remaining endurance, and `enduranceDrained`.
 
 ### Guard break
