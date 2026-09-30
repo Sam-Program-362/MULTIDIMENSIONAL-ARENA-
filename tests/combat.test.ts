@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COMBAT_FIXED_DT,
   COMBAT_TUNING,
   CombatEvent,
   CombatInput,
@@ -53,10 +54,45 @@ function faceDummyTowardPlayer(state: CombatState): void {
   state.dummy.facing = { x: toward.x / length, z: toward.z / length };
 }
 
+const attackCycleTicks = (): number =>
+  COMBAT_TUNING.attack.startupTicks + COMBAT_TUNING.attack.activeTicks + COMBAT_TUNING.attack.recoveryTicks;
+
+const dodgeCycleTicks = (): number =>
+  COMBAT_TUNING.dodge.startupTicks + COMBAT_TUNING.dodge.activeTicks + COMBAT_TUNING.dodge.recoveryTicks;
+
 const pairStep = (state: CombatState, dummy: Partial<CombatInput> = {}) => stepCombatantPair(state, {
   player: neutral(),
   dummy: neutral(dummy),
 });
+
+/** Separate the combatants so attacks whiff and the fight cannot end during long runs. */
+function outOfRange(state: CombatState): CombatState {
+  state.player.position = { x: -9, z: -6 };
+  state.dummy.position = { x: 9, z: 6 };
+  return state;
+}
+
+/** A player attack about to land on a dummy that cannot afford the block. */
+function brokenBlockSetup(): CombatState {
+  const state = readyPlayerAttack(createCombatState());
+  state.dummy.currentAction = { type: 'block', phase: 'active' };
+  state.dummy.actionTick = COMBAT_TUNING.block.startupTicks;
+  state.dummy.stamina = COMBAT_TUNING.block.staminaPerHit - 0.01;
+  faceDummyTowardPlayer(state);
+  return state;
+}
+
+/** Temporarily override the tunable post-block-break regen delay. */
+function withRegenDelay(ticks: number, body: () => void): void {
+  const tunable = COMBAT_TUNING.stamina as { regenDelayTicks: number };
+  const original = tunable.regenDelayTicks;
+  tunable.regenDelayTicks = ticks;
+  try {
+    body();
+  } finally {
+    tunable.regenDelayTicks = original;
+  }
+}
 
 describe('attack state machine', () => {
   it('honors attack startup, active, and recovery timing in ticks', () => {
@@ -142,21 +178,136 @@ describe('stamina', () => {
   it('applies attack and dodge stamina costs', () => {
     let state = createCombatState();
     const maximum = state.player.maxStamina;
+    // The attack tick also regenerates, because attacking never pauses regeneration.
     state = stepCombat(state, neutral({ attackPressed: true })).state;
-    expect(state.player.stamina).toBe(maximum - COMBAT_TUNING.attack.staminaCost);
+    expect(state.player.stamina).toBeCloseTo(
+      maximum - COMBAT_TUNING.attack.staminaCost + COMBAT_TUNING.stamina.regenPerTick,
+      10,
+    );
 
     state = createCombatState();
     state = stepCombat(state, neutral({ dodgePressed: true })).state;
     expect(state.player.stamina).toBe(maximum - COMBAT_TUNING.dodge.staminaCost);
   });
 
-  it('regenerates only after the configured delay', () => {
+  it('regenerates every tick with no delay after attacking', () => {
     let state = stepCombat(createCombatState(), neutral({ attackPressed: true })).state;
-    const spent = state.player.stamina;
-    state = runTicks(state, COMBAT_TUNING.stamina.regenDelayTicks - 1).state;
-    expect(state.player.stamina).toBe(spent);
+    let previous = state.player.stamina;
+    for (let index = 0; index < 10; index += 1) {
+      state = stepCombat(state, neutral()).state;
+      expect(state.player.stamina).toBeCloseTo(previous + COMBAT_TUNING.stamina.regenPerTick, 10);
+      previous = state.player.stamina;
+    }
+  });
+
+  it('keeps regenerating through every phase of an attack', () => {
+    const total = attackCycleTicks();
+    let state = outOfRange(createCombatState());
+    let previous = state.player.maxStamina;
+    const phases = new Set<string>();
+    for (let index = 0; index < total; index += 1) {
+      const spent = index === 0 ? COMBAT_TUNING.attack.staminaCost : 0;
+      state = stepCombat(state, neutral({ attackPressed: index === 0 })).state;
+      const expected = Math.min(
+        state.player.maxStamina,
+        previous - spent + COMBAT_TUNING.stamina.regenPerTick,
+      );
+      expect(state.player.stamina).toBeCloseTo(expected, 10);
+      if (state.player.currentAction.type === 'attack') phases.add(state.player.currentAction.phase);
+      previous = state.player.stamina;
+    }
+    expect([...phases].sort()).toEqual(['active', 'recovery', 'startup']);
+    expect(state.player.currentAction.type).toBe('idle');
+  });
+
+  it('regenerates a full attack cycle worth of stamina for every attack spent', () => {
+    // Design invariant: chaining basic attacks can never drain the bar.
+    expect(attackCycleTicks() * COMBAT_TUNING.stamina.regenPerTick)
+      .toBeGreaterThanOrEqual(COMBAT_TUNING.attack.staminaCost);
+  });
+
+  it('never runs out while chaining basic attacks for twenty seconds', () => {
+    const ticks = COMBAT_TUNING.tickRate * 20;
+    // Swinging at air, so the fight cannot end early and the chain runs the full twenty seconds.
+    let state = outOfRange(createCombatState());
+    let minimum = state.player.stamina;
+    let attacks = 0;
+    for (let index = 0; index < ticks; index += 1) {
+      const result = stepCombat(state, neutral({ attackPressed: true }));
+      state = result.state;
+      attacks += result.events.filter((event) => event.type === 'ACTION_STARTED' && event.action === 'attack').length;
+      minimum = Math.min(minimum, state.player.stamina);
+      expect(state.player.stamina).toBeGreaterThan(0);
+    }
+    expect(attacks).toBe(Math.floor(ticks / attackCycleTicks()));
+    expect(minimum).toBeGreaterThan(0);
+    // The bar never even dips below the cost of one more attack.
+    expect(minimum).toBeGreaterThanOrEqual(COMBAT_TUNING.attack.staminaCost);
+  });
+
+  it('refills from empty in the expected number of ticks', () => {
+    let state = createCombatState();
+    state.player.stamina = 0;
+    const expectedTicks = Math.ceil(state.player.maxStamina / COMBAT_TUNING.stamina.regenPerTick);
+    state = runTicks(state, expectedTicks - 1).state;
+    expect(state.player.stamina).toBeLessThan(state.player.maxStamina);
+    state = runTicks(state, 1).state;
+    expect(state.player.stamina).toBe(state.player.maxStamina);
+  });
+
+  it('pauses regeneration while block is held and resumes on the first tick after release', () => {
+    const holdTicks = 30;
+    let state = createCombatState();
+    state.player.stamina = 50;
+    const held = runTicks(state, holdTicks, () => neutral({ blockHeld: true }));
+    state = held.state;
+    expect(state.player.currentAction.type).toBe('block');
+    expect(state.player.currentAction.phase).toBe('active');
+    expect(state.player.stamina).toBe(50);
+
+    // First tick after release: block enters recovery and regeneration is already running.
     state = stepCombat(state, neutral()).state;
-    expect(state.player.stamina).toBe(spent + COMBAT_TUNING.stamina.regenPerTick);
+    expect(state.player.currentAction).toEqual({ type: 'block', phase: 'recovery' });
+    expect(state.player.stamina).toBeCloseTo(50 + COMBAT_TUNING.stamina.regenPerTick, 10);
+  });
+
+  it('pauses regeneration for the whole dodge and resumes on the first tick after', () => {
+    const dodgeTicks = dodgeCycleTicks();
+    let state = createCombatState();
+    const expected = state.player.maxStamina - COMBAT_TUNING.dodge.staminaCost;
+    state = stepCombat(state, neutral({ dodgePressed: true })).state;
+    for (let index = 1; index < dodgeTicks; index += 1) {
+      expect(state.player.stamina).toBe(expected);
+      expect(state.player.currentAction.type).toBe('dodge');
+      state = stepCombat(state, neutral()).state;
+    }
+    // Startup, active, and recovery all elapsed without regenerating.
+    expect(state.player.currentAction.type).toBe('idle');
+    expect(state.player.stamina).toBe(expected);
+
+    state = stepCombat(state, neutral()).state;
+    expect(state.player.stamina).toBeCloseTo(expected + COMBAT_TUNING.stamina.regenPerTick, 10);
+  });
+
+  it('allows at least six consecutive dodges from full stamina before the chain breaks', () => {
+    let state = outOfRange(createCombatState());
+    let dodges = 0;
+    for (let index = 0; index < 1000; index += 1) {
+      const wasIdle = state.player.currentAction.type === 'idle';
+      const result = stepCombat(state, neutral({ dodgePressed: true }));
+      state = result.state;
+      const started = result.events.some((event) => event.type === 'ACTION_STARTED' && event.action === 'dodge');
+      if (started) {
+        dodges += 1;
+        continue;
+      }
+      // The chain breaks on the first free tick where the buffered dodge cannot be paid for.
+      if (wasIdle) break;
+    }
+    expect(dodges).toBeGreaterThanOrEqual(6);
+    expect(dodges).toBe(Math.floor(state.player.maxStamina / COMBAT_TUNING.dodge.staminaCost));
+    // Chainable, but not infinite: the bar is left too low for one more.
+    expect(state.player.stamina).toBeLessThan(COMBAT_TUNING.dodge.staminaCost);
   });
 
   it('does not start actions without enough stamina', () => {
@@ -170,6 +321,101 @@ describe('stamina', () => {
     state.player.stamina = COMBAT_TUNING.dodge.staminaCost - 0.01;
     result = stepCombat(state, neutral({ dodgePressed: true }));
     expect(result.state.player.currentAction.type).toBe('idle');
+  });
+
+  it('starts actions at exactly the action cost', () => {
+    let state = createCombatState();
+    state.player.stamina = COMBAT_TUNING.attack.staminaCost;
+    let result = stepCombat(state, neutral({ attackPressed: true }));
+    expect(result.state.player.currentAction.type).toBe('attack');
+    expect(result.state.player.stamina).toBeCloseTo(COMBAT_TUNING.stamina.regenPerTick, 10);
+
+    state = createCombatState();
+    state.player.stamina = COMBAT_TUNING.dodge.staminaCost;
+    result = stepCombat(state, neutral({ dodgePressed: true }));
+    expect(result.state.player.currentAction.type).toBe('dodge');
+    expect(result.state.player.stamina).toBe(0);
+    expect(result.events.some((event) => event.type === 'STAMINA_DEPLETED')).toBe(true);
+  });
+
+  it('fires a buffered attack pressed at zero stamina once regeneration pays for it', () => {
+    let state = createCombatState();
+    state.player.stamina = COMBAT_TUNING.attack.staminaCost - COMBAT_TUNING.stamina.regenPerTick * 2;
+    const result = runTicks(state, 3, (index) => neutral({ attackPressed: index === 0 }));
+    const started = result.events.filter((event) => event.type === 'ACTION_STARTED' && event.action === 'attack');
+    expect(started).toHaveLength(1);
+    // Pressed on tick 1 while too drained; fires on tick 3, the first affordable tick.
+    expect(started[0]!.tick).toBe(3);
+  });
+
+  it('gives up a buffered press that stays unaffordable for the whole buffer window', () => {
+    let state = createCombatState();
+    state.player.stamina = 0;
+    const result = runTicks(state, COMBAT_TUNING.inputBufferTicks + 1, (index) => neutral({ attackPressed: index === 0 }));
+    expect(result.events.some((event) => event.type === 'ACTION_STARTED')).toBe(false);
+    expect(result.state.player.inputBuffer.attackTicks).toBe(0);
+  });
+
+  it('does not start a block below the minimum start stamina and keeps it drained while held', () => {
+    let state = createCombatState();
+    state.player.stamina = COMBAT_TUNING.block.minimumStartStamina - 0.01;
+    let result = stepCombat(state, neutral({ blockHeld: true }));
+    expect(result.state.player.currentAction.type).toBe('idle');
+    // Idle regenerates, so the block becomes available again shortly after.
+    expect(result.state.player.stamina).toBeCloseTo(
+      COMBAT_TUNING.block.minimumStartStamina - 0.01 + COMBAT_TUNING.stamina.regenPerTick,
+      10,
+    );
+
+    state = createCombatState();
+    state.player.stamina = COMBAT_TUNING.block.minimumStartStamina;
+    result = stepCombat(state, neutral({ blockHeld: true }));
+    expect(result.state.player.currentAction.type).toBe('block');
+    const heldStamina = result.state.player.stamina;
+    expect(heldStamina).toBe(COMBAT_TUNING.block.minimumStartStamina);
+    const held = runTicks(result.state, 60, () => neutral({ blockHeld: true }));
+    expect(held.state.player.stamina).toBe(heldStamina);
+  });
+});
+
+describe('attack movement', () => {
+  it('moves at the configured multiplier in each attack phase', () => {
+    let state = createCombatState();
+    state.player.position = { x: -9, z: 0 };
+    state.dummy.position = { x: 9, z: 6 };
+    const perTick = (multiplier: number) => COMBAT_TUNING.movementSpeed * multiplier * COMBAT_FIXED_DT;
+    const expectedFor = (actionTick: number) => {
+      if (actionTick < COMBAT_TUNING.attack.startupTicks) return perTick(COMBAT_TUNING.attack.startupMovementMultiplier);
+      if (actionTick < COMBAT_TUNING.attack.startupTicks + COMBAT_TUNING.attack.activeTicks) {
+        return perTick(COMBAT_TUNING.attack.activeMovementMultiplier);
+      }
+      return perTick(COMBAT_TUNING.attack.recoveryMovementMultiplier);
+    };
+
+    const total = attackCycleTicks();
+    for (let index = 0; index < total; index += 1) {
+      const before = state.player.position.x;
+      state = stepCombat(state, neutral({ x: 1, attackPressed: index === 0 })).state;
+      if (index < total - 1) expect(state.player.currentAction.type).toBe('attack');
+      expect(state.player.position.x - before).toBeCloseTo(expectedFor(index), 10);
+    }
+    // Idle movement is unmodified, and it returns instantly on the first idle tick.
+    const before = state.player.position.x;
+    state = stepCombat(state, neutral({ x: 1 })).state;
+    expect(state.player.currentAction.type).toBe('idle');
+    expect(state.player.position.x - before).toBeCloseTo(perTick(1), 10);
+  });
+
+  it('reaches full configured speed on the first tick with no acceleration ramp', () => {
+    let state = createCombatState();
+    state.player.position = { x: 0, z: 0 };
+    const first = stepCombat(state, neutral({ x: 1 })).state;
+    expect(first.player.position.x).toBeCloseTo(COMBAT_TUNING.movementSpeed * COMBAT_FIXED_DT, 10);
+    expect(first.player.velocity.x).toBeCloseTo(COMBAT_TUNING.movementSpeed, 10);
+    // Releasing the stick stops instantly too.
+    const stopped = stepCombat(first, neutral()).state;
+    expect(stopped.player.position.x).toBe(first.player.position.x);
+    expect(stopped.player.velocity.x).toBe(0);
   });
 });
 
@@ -210,6 +456,44 @@ describe('block resolution', () => {
     const result = pairStep(state, { blockHeld: true });
     expect(result.events.some((event) => event.type === 'BLOCK_BROKEN')).toBe(true);
     expect(result.events.find((event) => event.type === 'DAMAGE_APPLIED')?.amount).toBe(COMBAT_TUNING.attack.damage);
+  });
+
+  it('resumes regeneration immediately after a block break with the default zero delay', () => {
+    expect(COMBAT_TUNING.stamina.regenDelayTicks).toBe(0);
+    const state = brokenBlockSetup();
+    const broken = pairStep(state, { blockHeld: true });
+    expect(broken.events.some((event) => event.type === 'BLOCK_BROKEN')).toBe(true);
+    const drained = COMBAT_TUNING.block.staminaPerHit - 0.01;
+    expect(broken.state.dummy.stamina).toBeCloseTo(drained + COMBAT_TUNING.stamina.regenPerTick, 10);
+  });
+
+  it('applies the regen delay only after a block break', () => {
+    const delay = 20;
+    withRegenDelay(delay, () => {
+      const state = brokenBlockSetup();
+      let current = pairStep(state, { blockHeld: true }).state;
+      const drained = COMBAT_TUNING.block.staminaPerHit - 0.01;
+      // The break tick itself and the following delay-1 ticks do not regenerate.
+      expect(current.dummy.stamina).toBe(drained);
+      for (let index = 1; index < delay; index += 1) {
+        current = pairStep(current).state;
+        expect(current.dummy.stamina).toBe(drained);
+      }
+      current = pairStep(current).state;
+      expect(current.dummy.stamina).toBeCloseTo(drained + COMBAT_TUNING.stamina.regenPerTick, 10);
+    });
+  });
+
+  it('leaves the attacker regenerating normally through a block break', () => {
+    const delay = 20;
+    withRegenDelay(delay, () => {
+      const state = brokenBlockSetup();
+      state.player.stamina = 40;
+      const before = state.player.stamina;
+      const broken = pairStep(state, { blockHeld: true });
+      expect(broken.events.some((event) => event.type === 'BLOCK_BROKEN')).toBe(true);
+      expect(broken.state.player.stamina).toBeCloseTo(before + COMBAT_TUNING.stamina.regenPerTick, 10);
+    });
   });
 
   it('does not block a hit from behind', () => {

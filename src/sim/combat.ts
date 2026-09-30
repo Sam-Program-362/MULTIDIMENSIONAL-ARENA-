@@ -17,11 +17,11 @@ export const COMBAT_TUNING = {
     range: 2.1,
     arcDegrees: 100,
     damage: 18,
-    staminaCost: 20,
+    staminaCost: 5,
     lowStaminaDamageMultiplier: 0.9,
-    startupMovementMultiplier: 0.35,
-    activeMovementMultiplier: 0.2,
-    recoveryMovementMultiplier: 0.55,
+    startupMovementMultiplier: 0.75,
+    activeMovementMultiplier: 0.6,
+    recoveryMovementMultiplier: 0.85,
   },
   block: {
     startupTicks: 2,
@@ -39,10 +39,21 @@ export const COMBAT_TUNING = {
     recoveryTicks: 13,
     iframeTicks: 5,
     distance: 3,
-    staminaCost: 28,
+    staminaCost: 10,
     recoveryMovementMultiplier: 0,
   },
-  stamina: { regenDelayTicks: 45, regenPerTick: 0.45 },
+  stamina: {
+    /**
+     * Stamina regenerates every tick. It pauses only while block is held/active and for the
+     * whole dodge action, and resumes on the first tick after those end.
+     *
+     * `regenDelayTicks` is the ONLY regen pause that outlives an action, and it is applied
+     * exclusively after a block break, so that punish gap can be tuned without code changes.
+     * At the default 0 a broken block regenerates again immediately.
+     */
+    regenDelayTicks: 0,
+    regenPerTick: 0.3,
+  },
   vitals: {
     baselineStat: 50,
     baseHealth: 95,
@@ -98,6 +109,7 @@ export interface CombatantState {
   /** Generic action bookkeeping; it is present on both player and dummy. */
   attackConnected: boolean;
   actionDirection: Vec2;
+  /** Post-block-break regen pause in ticks. Nothing else sets it; spending stamina never does. */
   staminaRegenDelay: number;
   inputBuffer: { attackTicks: number; dodgeTicks: number };
   stationary: boolean;
@@ -263,10 +275,13 @@ function setAction(actor: CombatantState, type: Exclude<ActionType, 'idle'>, eve
   events.push({ type: 'ACTION_STARTED', tick, actorId: actor.id, action: type });
 }
 
+/**
+ * Spending stamina never starts a regen delay. Basic attacks are meant to be sustainable, so
+ * regeneration keeps running through them; only the pauses in `regenerateStamina` stop it.
+ */
 function spendStamina(actor: CombatantState, amount: number, events: CombatEvent[], tick: number): void {
   const before = actor.stamina;
   actor.stamina = Math.max(0, actor.stamina - amount);
-  actor.staminaRegenDelay = COMBAT_TUNING.stamina.regenDelayTicks;
   if (before > 0 && actor.stamina === 0) {
     events.push({ type: 'STAMINA_DEPLETED', tick, actorId: actor.id, remaining: 0 });
   }
@@ -294,23 +309,21 @@ function startBufferedAction(
   if (actor.currentAction.type !== 'idle' || actor.defeated) return;
 
   // Dodge wins a same-tick tie, then attack, then held block. The losing tap is discarded.
-  if (actor.inputBuffer.dodgeTicks > 0) {
+  // A press that cannot be paid for is not consumed: it keeps decaying in the buffer and fires
+  // on the first buffered tick where enough stamina exists.
+  if (actor.inputBuffer.dodgeTicks > 0 && actor.stamina >= COMBAT_TUNING.dodge.staminaCost) {
     actor.inputBuffer.dodgeTicks = 0;
-    if (actor.stamina >= COMBAT_TUNING.dodge.staminaCost) {
-      actor.inputBuffer.attackTicks = 0;
-      actor.actionDirection = dodgeDirection(actor, opponent, input);
-      setAction(actor, 'dodge', events, tick);
-      spendStamina(actor, COMBAT_TUNING.dodge.staminaCost, events, tick);
-      return;
-    }
-  }
-  if (actor.inputBuffer.attackTicks > 0) {
     actor.inputBuffer.attackTicks = 0;
-    if (actor.stamina >= COMBAT_TUNING.attack.staminaCost) {
-      setAction(actor, 'attack', events, tick);
-      spendStamina(actor, COMBAT_TUNING.attack.staminaCost, events, tick);
-      return;
-    }
+    actor.actionDirection = dodgeDirection(actor, opponent, input);
+    setAction(actor, 'dodge', events, tick);
+    spendStamina(actor, COMBAT_TUNING.dodge.staminaCost, events, tick);
+    return;
+  }
+  if (actor.inputBuffer.attackTicks > 0 && actor.stamina >= COMBAT_TUNING.attack.staminaCost) {
+    actor.inputBuffer.attackTicks = 0;
+    setAction(actor, 'attack', events, tick);
+    spendStamina(actor, COMBAT_TUNING.attack.staminaCost, events, tick);
+    return;
   }
   if (input.blockHeld && actor.stamina >= COMBAT_TUNING.block.minimumStartStamina) {
     setAction(actor, 'block', events, tick);
@@ -402,6 +415,8 @@ function breakBlock(target: CombatantState, events: CombatEvent[], tick: number,
   target.currentAction = { type: 'stagger', phase: 'recovery' };
   target.actionTick = 0;
   target.invulnerable = false;
+  // The block break is the only event that delays regeneration beyond the action itself.
+  target.staminaRegenDelay = COMBAT_TUNING.stamina.regenDelayTicks;
   events.push({ type: 'BLOCK_BROKEN', tick, actorId: target.id, targetId: attacker.id });
 }
 
@@ -488,13 +503,27 @@ function finishOrAdvanceAction(actor: CombatantState): void {
   }
 }
 
-function regenerateStamina(actor: CombatantState): void {
+/**
+ * True while the action this actor performed on the current tick suppresses regeneration:
+ * a held/active block, or any phase of a dodge. Attacks, stagger, and idle all regenerate.
+ */
+function pausesStaminaRegen(action: CurrentAction): boolean {
+  if (action.type === 'block') return action.phase === 'startup' || action.phase === 'active';
+  return action.type === 'dodge';
+}
+
+/**
+ * Continuous regeneration. It is evaluated against the action the actor was performing during
+ * this tick, so the first tick after a block release or a dodge ends already regenerates.
+ * The only carried-over pause is `staminaRegenDelay`, set exclusively by a block break.
+ */
+function regenerateStamina(actor: CombatantState, actionThisTick: CurrentAction): void {
   if (actor.defeated) return;
+  if (pausesStaminaRegen(actionThisTick)) return;
   if (actor.staminaRegenDelay > 0) {
     actor.staminaRegenDelay -= 1;
     return;
   }
-  if (actor.currentAction.type === 'block') return;
   actor.stamina = Math.min(actor.maxStamina, actor.stamina + COMBAT_TUNING.stamina.regenPerTick);
 }
 
@@ -539,8 +568,10 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
       actor.currentAction.phase = 'recovery';
       actor.actionTick = 0;
     }
+    // Captured before the action advances so regen resumes on the first tick after it ends.
+    const actionThisTick: CurrentAction = { ...actor.currentAction };
     finishOrAdvanceAction(actor);
-    regenerateStamina(actor);
+    regenerateStamina(actor, actionThisTick);
     decrementBuffers(actor);
   }
   return { state: next, events };
