@@ -1,6 +1,6 @@
 # MULTIDIMENSIONAL ARENA
 
-MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1c.1 is implemented:** create/save a fighter, enter a fixed-timestep 2.5D training arena, and use movement, attack, hold-to-block, and dodge against either a stationary dummy or the seeded Rookie sparring opponent. Health, stamina, endurance (the guard resource), action timing, the per-attack minimum interval, input buffering, AI decisions, and combat events run in the deterministic DOM-free simulation. The persistent world remains planned.
+MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1c.2 is implemented:** create/save a fighter, enter a fixed-timestep 2.5D training arena, and use movement, attack, hold-to-block, and dodge against either a stationary dummy or the seeded Rookie sparring opponent. Health, stamina, endurance (the guard resource), action timing, the per-attack minimum interval, input buffering, AI decisions, and combat events run in the deterministic DOM-free simulation. The persistent world remains planned.
 
 ## Stack
 
@@ -38,7 +38,7 @@ npm run build  # type-check and create dist/
 - `tests/` simulation, input, storage, and DOM-boundary tests
 - `docs/decisions/` accepted architecture and simulation decisions
 
-Blocking a frontal hit costs **endurance**, not health and not stamina; when endurance hits zero the guard breaks and the defender is staggered for 30 ticks at full damage. Attacks obey a per-attack minimum interval (34 ticks for the basic attack profile), shown as a fill on the Attack button. See `docs/decisions/006-endurance-and-attack-interval.md`.
+Blocking a frontal hit costs **endurance**, not health and not stamina; a blocker auto-faces during block startup/active, and when endurance hits zero the guard breaks for 40 ticks at full damage. Endurance is 0 at stagger end, waits 30 more ticks, then regenerates at 0.30 per tick. Attacks obey a per-attack minimum interval (28 ticks for the basic attack profile), shown as a fill on the Attack button. The Rookie uses delayed public cooldown awareness and an edge-distance engagement cycle. See `docs/decisions/007-block-facing-guard-recovery-and-ai-spacing.md`.
 
 Heavy attacks, a weapon/equipment system, parry or perfect block, and adaptive AI are **planned only**.
 

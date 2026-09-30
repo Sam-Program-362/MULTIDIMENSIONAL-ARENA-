@@ -30,7 +30,7 @@ const BASIC_ATTACK_PROFILE: AttackProfile = {
   arcDegrees: 100,
   damage: 18,
   staminaCost: 5,
-  minIntervalTicks: 34,
+  minIntervalTicks: 28,
   lowStaminaDamageMultiplier: 0.9,
   startupMovementMultiplier: 0.75,
   activeMovementMultiplier: 0.6,
@@ -61,11 +61,13 @@ export const COMBAT_TUNING = {
     blockChipFraction: 0,
     /** Endurance removed per point of blocked damage. */
     enduranceDrainPerDamage: 1,
-    enduranceRegenPerTick: 0.25,
+    enduranceRegenPerTick: 0.30,
     /** Ticks without a blocked hit before endurance starts recovering. */
     enduranceRegenDelayTicks: 45,
-    guardBreakStaggerTicks: 30,
-    guardBreakResetRatio: 0.5,
+    /** Ticks after a guard-break stagger ends before the empty guard regenerates. */
+    guardBreakRegenDelayTicks: 30,
+    guardBreakStaggerTicks: 40,
+    guardBreakResetRatio: 0,
   },
   dodge: {
     startupTicks: 1,
@@ -144,7 +146,7 @@ export interface CombatantState {
   /** Guard resource. Only blocked hits drain it; it is independent of stamina. */
   endurance: number;
   maxEndurance: number;
-  /** Ticks left before endurance starts regenerating again after a blocked hit. */
+  /** Ticks left before endurance starts regenerating again after a blocked hit or guard break. */
   enduranceRegenDelay: number;
   /** True from the guard-breaking hit until the stagger ends (UI + AI read it). */
   guardBroken: boolean;
@@ -526,7 +528,9 @@ function breakGuard(
 ): void {
   target.endurance = 0;
   target.guardBroken = true;
-  target.enduranceRegenDelay = COMBAT_TUNING.block.enduranceRegenDelayTicks;
+  // The ordinary blocked-hit delay is not allowed to run out during the stagger. The
+  // guard-break delay is installed when the stagger ends, so the defender stays empty.
+  target.enduranceRegenDelay = COMBAT_TUNING.block.guardBreakRegenDelayTicks;
   target.currentAction = { type: 'stagger', phase: 'recovery' };
   target.actionTick = 0;
   target.invulnerable = false;
@@ -635,9 +639,12 @@ function finishOrAdvanceAction(actor: CombatantState): void {
     : actor.actionTick >= actionTotalTicks(type, actor);
   if (finished) {
     if (type === 'stagger' && actor.guardBroken) {
-      // Endurance comes back at a fraction of max once the stagger is over.
+      // A broken guard ends empty. Its separate delay starts now (not during stagger),
+      // making the post-stagger interval visibly defenseless and gradual.
       actor.guardBroken = false;
       actor.endurance = actor.maxEndurance * COMBAT_TUNING.block.guardBreakResetRatio;
+      // This tick is the final stagger tick, not one of the post-stagger delay ticks.
+      actor.enduranceRegenDelay = COMBAT_TUNING.block.guardBreakRegenDelayTicks + 1;
     }
     actor.currentAction = { type: 'idle', phase: 'idle' };
     actor.actionTick = 0;
@@ -728,7 +735,13 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
   ];
 
   for (const { actor, input } of pairs) bufferInput(actor, input);
-  for (const { actor, opponent } of pairs) if (actor.currentAction.type === 'idle') faceOpponent(actor, opponent);
+  // Idle and a held block auto-face the opponent. Every other action, including block
+  // recovery, keeps its committed facing so circling cannot turn an attack or recovery.
+  for (const { actor, opponent } of pairs) {
+    const blockingAndTurnable = actor.currentAction.type === 'block'
+      && (actor.currentAction.phase === 'startup' || actor.currentAction.phase === 'active');
+    if (actor.currentAction.type === 'idle' || blockingAndTurnable) faceOpponent(actor, opponent);
+  }
   for (const { actor, opponent, input } of pairs) startBufferedAction(actor, opponent, input, events, next.tick);
   for (const { actor, input } of pairs) prepareAction(actor, input);
   for (const { actor, input } of pairs) moveCombatant(actor, input, next.bounds);

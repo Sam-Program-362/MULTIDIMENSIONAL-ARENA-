@@ -20,7 +20,7 @@ Landscape phone playtesting of Phase 1c surfaced three problems:
 | Resource | Spent by | Regenerates | Failure state |
 | --- | --- | --- | --- |
 | **Stamina** | attacks (5), dodges (10) | 0.30/tick, continuous; paused only while block is held/active and during a dodge | actions simply cannot start |
-| **Endurance** | blocked hits only (`damage * enduranceDrainPerDamage`) | 0.25/tick, but only after `enduranceRegenDelayTicks` (45) with no blocked hit; runs whether or not block is held | **guard break** |
+| **Endurance** | blocked hits only (`damage * enduranceDrainPerDamage`) | 0.30/tick, but only after `enduranceRegenDelayTicks` (45) with no blocked hit; runs whether or not block is held | **guard break** |
 
 `maxEndurance` is derived in `deriveCombatVitals` from the hidden stamina stat (primary, 0.2) and
 hidden willpower (secondary, 0.05, deliberately small) around a base of 100, clamped to 90..110 —
@@ -39,10 +39,10 @@ the same shape and bounded output as health and stamina.
 If a blocked hit would take endurance to 0 or below:
 
 - that hit deals **full** health damage;
-- the defender is staggered for `guardBreakStaggerTicks` (30): it cannot act, its input buffer is
+- the defender is staggered for `guardBreakStaggerTicks` (40): it cannot act, its input buffer is
   cleared, and every hit during the stagger deals full damage;
 - blocking ends immediately and `endurance` is 0 for the whole stagger;
-- when the stagger ends, endurance is restored to `guardBreakResetRatio` (0.5) of max;
+- when the stagger ends, endurance is restored to `guardBreakResetRatio` (0) of max, then waits `guardBreakRegenDelayTicks` (30) before gradual recovery;
 - events: `ENDURANCE_DEPLETED`, `GUARD_BROKEN`, and `BLOCK_BROKEN` (kept as a compatible alias).
 
 The old stamina-based block break is gone; `stamina.regenDelayTicks` survives as the one tunable
@@ -56,7 +56,7 @@ and combat code reads timing, range, arc, damage, cost, and movement multipliers
 `attackProfileOf(actor)`, so a future weapon can supply its own profile. **No weapon system is
 built here.**
 
-`minIntervalTicks` (34) is measured from the START of one attack to the earliest start of the
+`minIntervalTicks` (28) is measured from the START of one attack to the earliest start of the
 next. The natural cycle is 6+3+15 = 24 ticks, so 10 ticks of pure cooldown follow recovery.
 `attackCooldownRemaining` / `attackCooldownFraction` are on the combatant state for the UI.
 Input buffering is unchanged: a press that cannot be satisfied inside the existing 6-tick buffer
@@ -83,7 +83,7 @@ window is dropped. Blocking, dodging, and movement are never gated by the attack
 ## Consequences
 
 - Holding block is now a real, exhaustible defense instead of a slow health loss.
-- Mashing is capped at one attack per 34 ticks and the Attack button shows the cooldown fill.
+- Mashing is capped at one attack per 28 ticks and the Attack button shows the cooldown fill. Phase 1c.2 further requires block auto-facing and post-break empty recovery; see decision 007.
 - Fights last longer against a guarding AI and reward punishing its recovery windows.
 - No save-format change: combat state is still session-only and the schema stays at version 1.
 

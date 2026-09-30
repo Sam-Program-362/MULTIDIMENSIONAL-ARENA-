@@ -491,7 +491,7 @@ describe('endurance and guard break', () => {
     expect(result.events.find((event) => event.type === 'DAMAGE_APPLIED')?.amount).toBe(COMBAT_TUNING.attack.damage);
   });
 
-  it('staggers for the configured duration, refuses input, and restores half endurance', () => {
+  it('staggers for the configured duration, refuses input, and ends at zero endurance', () => {
     const state = brokenBlockSetup();
     let current = pairStep(state, { blockHeld: true }).state;
     // Keep the attacker harmless for the rest of the stagger.
@@ -508,10 +508,8 @@ describe('endurance and guard break', () => {
     current = pairStep(current, { attackPressed: true }).state;
     expect(current.dummy.currentAction.type).toBe('idle');
     expect(current.dummy.guardBroken).toBe(false);
-    expect(current.dummy.endurance).toBeCloseTo(
-      current.dummy.maxEndurance * COMBAT_TUNING.block.guardBreakResetRatio,
-      10,
-    );
+    expect(current.dummy.endurance).toBe(0);
+    expect(current.dummy.enduranceRegenDelay).toBe(COMBAT_TUNING.block.guardBreakRegenDelayTicks);
   });
 
   it('applies full damage to extra hits landed during the stagger', () => {
@@ -562,16 +560,32 @@ describe('endurance and guard break', () => {
     expect(current.dummy.endurance).toBe(current.dummy.maxEndurance);
   });
 
-  it('does not block a hit from behind and does not drain endurance', () => {
+  it('auto-faces during block so circling cannot hit behind the guard', () => {
     const state = blockingSetup();
     state.dummy.facing = { x: -state.dummy.facing.x, z: -state.dummy.facing.z };
     const startingEndurance = state.dummy.endurance;
     const startingStamina = state.dummy.stamina;
     const result = pairStep(state, { blockHeld: true });
-    expect(result.events.some((event) => event.type === 'ATTACK_HIT')).toBe(true);
-    expect(result.events.some((event) => event.type === 'ATTACK_BLOCKED')).toBe(false);
-    expect(result.state.dummy.endurance).toBe(startingEndurance);
+    expect(result.events.some((event) => event.type === 'ATTACK_HIT')).toBe(false);
+    expect(result.events.some((event) => event.type === 'ATTACK_BLOCKED')).toBe(true);
+    expect(result.state.dummy.endurance).toBeLessThan(startingEndurance);
     expect(result.state.dummy.stamina).toBe(startingStamina);
+  });
+
+  it('keeps endurance at zero through the post-stagger delay and then regenerates gradually', () => {
+    let current = pairStep(brokenBlockSetup(), { blockHeld: true }).state;
+    current.player.position = { x: -9, z: -6 };
+    for (let index = 0; index < COMBAT_TUNING.block.guardBreakStaggerTicks; index += 1) {
+      current = pairStep(current).state;
+    }
+    expect(current.dummy.endurance).toBe(0);
+    for (let index = 0; index < COMBAT_TUNING.block.guardBreakRegenDelayTicks - 1; index += 1) {
+      current = pairStep(current).state;
+      expect(current.dummy.endurance).toBe(0);
+    }
+    current = pairStep(current).state;
+    expect(current.dummy.endurance).toBeGreaterThan(0);
+    expect(current.dummy.endurance).toBeCloseTo(COMBAT_TUNING.block.enduranceRegenPerTick, 10);
   });
 
   it('resumes stamina regeneration immediately after a guard break with the default delay', () => {

@@ -4,7 +4,7 @@ The implemented foundation follows these principles:
 
 - `src/sim/` contains deterministic fighter generation, input mapping, arena movement, combat rules, and the Rookie AI without DOM/browser references.
 - `src/sim/ai.ts` converts delayed observations into the same `CombatInput` used by the player. Its target history and serializable seeded-RNG state are plain data; `stepCombatWithAi` sends the result through the shared pair-combat step.
-- Combatant resources are separated by role: health, **stamina** (attacks and dodges), and **endurance** (blocked hits only, with guard break at zero). All three are derived and bounded in `deriveCombatVitals` and live on the same generic combatant shape used by the player, the dummy, and the AI opponent.
+- Combatant resources are separated by role: health, **stamina** (attacks and dodges), and **endurance** (blocked hits only, with guard break at zero). A broken guard staggers for 40 ticks, ends at zero endurance, waits 30 additional ticks, then regenerates gradually. All three are derived and bounded in `deriveCombatVitals` and live on the same generic combatant shape used by the player, the dummy, and the AI opponent.
 - Attack numbers live in an `AttackProfile` (`COMBAT_TUNING.attackProfiles.basic`). Combat reads them through `attackProfileOf(actor)` using the combatant's `attackProfileId`, so per-weapon profiles can be added later without touching combat code. A per-attack `minIntervalTicks` gates only attacks; block, dodge, and movement are unaffected.
 - `src/ui/` owns screens, browser input, the fixed-timestep render loop, the Dummy/Opponent session toggle, and canvas presentation.
 - `src/storage/` owns the versioned local fighter-save adapter. Combat and AI state are intentionally not saved.
