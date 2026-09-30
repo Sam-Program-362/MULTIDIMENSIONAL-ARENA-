@@ -20,16 +20,7 @@ export interface AiProfile {
   caution: number;
   mistakeChance: number;
   preferredRange: number;
-  /** Distance beyond the target's public attack reach used as the default edge. */
-  reachMargin: number;
   rangeTolerance: number;
-  baitPunishWeight: number;
-  dashStrikeWeight: number;
-  pokeWeight: number;
-  patienceTicksMin: number;
-  patienceTicksMax: number;
-  disengageTicksMin: number;
-  disengageTicksMax: number;
   mistakeRangeMargin: number;
   defenseRangeMargin: number;
   retreatStaminaRatio: number;
@@ -69,15 +60,7 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   caution: 0.52,
   mistakeChance: 0.14,
   preferredRange: 1.65,
-  reachMargin: 0.5,
-  rangeTolerance: 0.18,
-  baitPunishWeight: 0.40,
-  dashStrikeWeight: 0.32,
-  pokeWeight: 0.28,
-  patienceTicksMin: 40,
-  patienceTicksMax: 90,
-  disengageTicksMin: 18,
-  disengageTicksMax: 45,
+  rangeTolerance: 0.25,
   mistakeRangeMargin: 0.55,
   defenseRangeMargin: 0.45,
   retreatStaminaRatio: 0.22,
@@ -113,8 +96,6 @@ export interface AiTargetSnapshot {
   facing: Vec2;
   currentAction: { type: ActionType; phase: ActionPhase };
   actionTick: number;
-  /** Public cooldown remaining; delayed with the rest of the snapshot. */
-  attackCooldownRemaining: number;
   staminaBand: StaminaBand;
   defeated: boolean;
 }
@@ -132,8 +113,6 @@ export interface AiMistakeCounts {
   overblock: number;
   overcommit: number;
 }
-
-export type AiPlan = 'approach' | 'hold' | 'bait-punish' | 'dash-strike' | 'poke' | 'strike' | 'disengage';
 
 export type AiDecisionReason =
   | 'waiting'
@@ -166,10 +145,6 @@ export interface AiState {
   decisionCount: number;
   mistakes: AiMistakeCounts;
   lastDecision: AiDecisionReason;
-  plan: AiPlan;
-  planUntilTick: number;
-  patienceUntilTick: number;
-  strikeStarted: boolean;
 }
 
 export interface AiDecision {
@@ -187,7 +162,6 @@ const neutralSnapshot = (): AiTargetSnapshot => ({
   facing: { x: 0, z: 1 },
   currentAction: { type: 'idle', phase: 'idle' },
   actionTick: 0,
-  attackCooldownRemaining: 0,
   staminaBand: 'ok',
   defeated: false,
 });
@@ -198,7 +172,6 @@ function targetSnapshot(target: CombatantState): AiTargetSnapshot {
     facing: { ...target.facing },
     currentAction: { ...target.currentAction },
     actionTick: target.actionTick,
-    attackCooldownRemaining: target.attackCooldownRemaining,
     staminaBand: target.stamina / target.maxStamina <= COMBAT_TUNING.lowStaminaThreshold ? 'low' : 'ok',
     defeated: target.defeated,
   };
@@ -233,20 +206,10 @@ export function createAiState(
     decisionCount: 0,
     mistakes: { outsideAttack: 0, overblock: 0, overcommit: 0 },
     lastDecision: 'waiting',
-    plan: 'approach',
-    planUntilTick: 0,
-    patienceUntilTick: 0,
-    strikeStarted: false,
   };
 }
 
 const lengthOf = (vector: Vec2): number => Math.hypot(vector.x, vector.z);
-
-const randomRange = (random: () => number, minimum: number, maximum: number): number =>
-  minimum + Math.floor(random() * (Math.max(minimum, maximum) - minimum + 1));
-
-const attackProfileOfTarget = (profile: AiProfile): number =>
-  COMBAT_TUNING.attack.range + profile.reachMargin;
 
 function normalized(vector: Vec2): Vec2 {
   const length = lengthOf(vector);
@@ -284,8 +247,7 @@ function movementAtRange(
     target.position.x - self.position.x,
     target.position.z - self.position.z,
   );
-  const edgeDistance = COMBAT_TUNING.attack.range + profile.reachMargin;
-  if (distance > edgeDistance + profile.rangeTolerance) {
+  if (distance > profile.preferredRange + profile.rangeTolerance) {
     return { x: toward.x * profile.approachStrength, z: toward.z * profile.approachStrength };
   }
 
@@ -388,35 +350,11 @@ export function decide(
   if (staminaRatio <= profile.retreatStaminaRatio) retreatUntilTick = tick + profile.retreatTicks;
   const retreating = tick < retreatUntilTick && staminaRatio < profile.retreatResumeStaminaRatio;
 
-  const edgeDistance = attackProfileOfTarget(profile);
-  let plan = aiState.plan;
-  let planUntilTick = aiState.planUntilTick;
-  let patienceUntilTick = aiState.patienceUntilTick;
-  let strikeStarted = aiState.strikeStarted;
-  // A strike is a complete engagement: once the action returns idle, leave before selecting
-  // another plan. This also prevents a stationary attacker from being met at point blank.
-  if (plan === 'strike' && self.currentAction.type === 'idle' && strikeStarted) {
-    plan = 'disengage';
-    strikeStarted = false;
-    planUntilTick = tick + randomRange(random, profile.disengageTicksMin, profile.disengageTicksMax);
-  }
-  if (plan === 'approach' && distance <= edgeDistance + profile.rangeTolerance) {
-    plan = 'hold';
-    patienceUntilTick = tick + randomRange(random, profile.patienceTicksMin, profile.patienceTicksMax);
-  }
-  if (plan === 'disengage' && tick >= planUntilTick) {
-    plan = 'hold';
-    patienceUntilTick = tick + randomRange(random, profile.patienceTicksMin, profile.patienceTicksMax);
-  }
-
   let heldMovement = movementAtRange(self, target, profile, circleDirection);
   let reason: AiDecisionReason = distance > profile.preferredRange + profile.rangeTolerance
     ? 'approach'
     : 'circle';
   if (retreating) {
-    heldMovement = retreatMovement(self, target, profile.retreatStrength);
-    reason = 'retreat';
-  } else if (plan === 'disengage') {
     heldMovement = retreatMovement(self, target, profile.retreatStrength);
     reason = 'retreat';
   }
@@ -454,33 +392,10 @@ export function decide(
   const dashLeavesEnoughStamina = self.maxStamina > 0
     && (self.stamina - COMBAT_TUNING.dodge.staminaCost) / self.maxStamina >= profile.dashMinStaminaRatio;
   const staminaRatioOkForDash = staminaRatio >= profile.dashMinStaminaRatio;
-  const observedTargetCooldown = target.attackCooldownRemaining <= 0;
-  const opening = observedPunishable || (!observedTargetCooldown && target.currentAction.type !== 'attack');
-  if (!retreating && (plan === 'poke' || (plan === 'bait-punish' && opening))
-    && distance > attackProfile.range) {
-    heldMovement = steerInsideBounds(
-      { x: towardTarget.x / Math.max(distance, 1), z: towardTarget.z / Math.max(distance, 1) },
-      self, observation.bounds, profile.wallBuffer,
-    );
-  }
-
-  // Choose the next entry only at the edge and only on the decision interval. Bait waits for
-  // delayed public openings; patience guarantees a passive target is eventually engaged.
-  if (!retreating && plan === 'hold' && distance <= edgeDistance + profile.rangeTolerance
-    && (opening || tick >= patienceUntilTick)) {
-    const total = profile.baitPunishWeight + profile.dashStrikeWeight + profile.pokeWeight;
-    const pick = total > 0 ? aggressionRoll * total : 0;
-    if (pick < profile.baitPunishWeight) plan = 'bait-punish';
-    else if (pick < profile.baitPunishWeight + profile.dashStrikeWeight) plan = 'dash-strike';
-    else plan = 'poke';
-    patienceUntilTick = tick + randomRange(random, profile.patienceTicksMin, profile.patienceTicksMax);
-  }
 
   if (!retreating && canAttackNow && observedPunishable && distance <= attackProfile.range
     && punishRoll < profile.punishChance) {
     input.attackPressed = true;
-    plan = 'strike';
-    strikeStarted = true;
     reason = 'punish';
   } else if (!retreating && idle && observedStartup && defensiveRange && cautionRoll < profile.caution) {
     if (defenseRoll < profile.dodgeShare && enoughToDodge) {
@@ -522,8 +437,7 @@ export function decide(
     // Gap-close dash: only when clearly far away and stamina stays above the floor afterwards.
     !retreating
     && idle
-    && (plan === 'dash-strike' || distance > profile.dashCloseDistance)
-    && distance > COMBAT_TUNING.attack.range
+    && distance > profile.dashCloseDistance
     && enoughToDodge
     && staminaRatioOkForDash
     && dashLeavesEnoughStamina
@@ -535,17 +449,13 @@ export function decide(
     input.dodgePressed = true;
     heldMovement = steerInsideBounds(toward, self, observation.bounds, profile.wallBuffer);
     reason = 'dash-close';
-  } else if (!retreating && idle && enoughToAttack && self.attackCooldownRemaining <= 0) {
-    // Regular attacks are entry attacks only. At the edge, bait waits for a delayed opening;
-    // poke is the explicit exception that steps in and swings once.
-    const entryAllowed = plan === 'poke'
-      || (plan === 'bait-punish' && opening)
-      || (distance <= attackProfile.range && plan !== 'hold' && plan !== 'disengage');
-    if (entryAllowed && distance <= attackProfile.range && self.attackCooldownRemaining <= 0
-      && aggressionRoll < profile.aggression) {
+  } else if (!retreating && idle && enoughToAttack) {
+    // 1c.3 fix: only press Attack when the shared attack cooldown is ready, or close enough
+    // that the input buffer keeps the press alive until it clears. Prevents dead presses that
+    // the old build wasted while on cooldown.
+    const attackReadyOrBuffered = self.attackCooldownRemaining < COMBAT_TUNING.inputBufferTicks;
+    if (distance <= attackProfile.range && attackReadyOrBuffered && aggressionRoll < profile.aggression) {
       input.attackPressed = true;
-      plan = 'strike';
-      strikeStarted = true;
       reason = 'attack';
     } else if (
       distance > attackProfile.range
@@ -586,10 +496,6 @@ export function decide(
     decisionCount: aiState.decisionCount + 1,
     mistakes,
     lastDecision: reason,
-    plan,
-    planUntilTick,
-    patienceUntilTick,
-    strikeStarted,
   };
   return { input, nextAiState };
 }

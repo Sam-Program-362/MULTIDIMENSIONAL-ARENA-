@@ -1,0 +1,14 @@
+
+=== BASELINE — 40 seeds, 5400 tick cap (90s @ 60/s) ===
+------------------------------------------------------------------------------------------------
+#  Scenario              Result                                      Goal                Pass
+------------------------------------------------------------------------------------------------
+a  Stationary spammer    spammer wins 82.5% (AI 7.5%)                spammer <= 50%      FAIL
+b  Idle player           AI wins 100.0%, draws 0, stalemates 0       AI >= 95%, 0 draw/stalePASS
+c  Holds Block forever   AI wins 100.0%                              AI >= 90%           PASS
+d  Runs away + Dodge     avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks (3s)   PASS
+e  Counter-puncher       counter wins 0.0%                           counter >= 55%      FAIL
+f  Two spammers          player 37.5% / dummy 57.5% / draw 2         each 35–65%         PASS
+g  AI vs AI              finished 40/40, avg 391 ticks               no stalemate        PASS
+------------------------------------------------------------------------------------------------
+5/7 goals met
