@@ -18,6 +18,12 @@ import {
   stepCombat,
   stepCombatWithAi,
   ticksForElapsed,
+  createOffers,
+  startMatch,
+  settleMatch,
+  resolvePendingOnLoad,
+  resolveFightResult,
+  type CareerState,
 } from '../sim';
 import { browserStorage } from '../storage';
 import './styles.css';
@@ -25,6 +31,8 @@ import './styles.css';
 const root = document.querySelector<HTMLDivElement>('#app')!;
 const storage = browserStorage();
 const list = (value: string) => value.split(',').map((part) => part.trim()).filter(Boolean);
+const whole = (value: number) => Math.round(value).toString();
+const tierLabel = (tier: string) => tier === 'rookie' ? 'Rookie bout' : 'Veteran bout';
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
 }[character]!));
@@ -33,7 +41,7 @@ export function renderStart(): void {
   const fighter = storage.load();
   root.innerHTML = `<main class="shell start-screen"><div class="eyebrow">MULTIDIMENSIONAL ARENA</div><h1>Enter the arena.</h1><p class="lede">Build a fighter with a history, a style, and a future worth risking.</p><div class="actions"><button class="primary" id="new">New Fighter</button><button id="continue" ${fighter ? '' : 'disabled'}>Continue</button></div>${fighter ? `<p class="save-note">Save found: ${escapeHtml(fighter.name)}</p>` : '<p class="save-note">No fighter saved yet.</p>'}</main>`;
   root.querySelector('#new')!.addEventListener('click', renderCreation);
-  root.querySelector('#continue')?.addEventListener('click', () => fighter && renderProfile(fighter));
+  root.querySelector('#continue')?.addEventListener('click', () => { const game = storage.loadGame(); if (game) { const resolved = resolvePendingOnLoad(game); if (resolved.summary) storage.saveGame(resolved.state); renderHub(resolved.state.fighter, resolved.summary ? 'You abandoned your last match. Fee lost.' : undefined); } });
 }
 
 function field(label: string, name: string, placeholder: string, required = true): string {
@@ -70,25 +78,40 @@ export function renderCreation(): void {
       const seed = Date.now() ^ Math.floor(Math.random() * 0xffffffff);
       const fighter = createFighter(input, seed);
       storage.save(fighter);
-      renderProfile(fighter);
+      renderHub(fighter);
     } catch (error) {
       root.querySelector('#error')!.textContent = error instanceof Error ? error.message : 'Unable to create fighter.';
     }
   });
 }
 
-export function renderProfile(fighter: Fighter): void {
-  const itemList = (values: string[]) => values.length ? values.map(escapeHtml).join(', ') : 'None';
-  root.innerHTML = `<main class="shell"><button class="back" id="home">← Start screen</button><div class="profile-heading"><div><div class="eyebrow">FIGHTER PROFILE</div><h1>${escapeHtml(fighter.name)}</h1><p class="muted">${escapeHtml(fighter.species)} · ${escapeHtml(fighter.origin)}</p></div><div class="badge">${escapeHtml(fighter.progression.rank)}</div></div><div class="condition"><span class="pulse"></span><div><strong>${describeCondition(fighter)}</strong><small>Current condition</small></div></div><section class="card"><h2>Identity</h2><dl><dt>Background</dt><dd>${escapeHtml(fighter.background)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Titles</dt><dd>${itemList(fighter.progression.titles)}</dd><dt>Currency</dt><dd>${fighter.progression.currency} credits</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section><section class="card"><h2>Combat identity</h2><dl><dt>Primary style</dt><dd>${escapeHtml(fighter.primaryStyle)}</dd><dt>Secondary styles</dt><dd>${itemList(fighter.secondaryStyles)}</dd><dt>Power system</dt><dd>${escapeHtml(fighter.powerSystem)}</dd><dt>Weapons</dt><dd>${itemList(fighter.weapons)}</dd><dt>Equipment</dt><dd>${itemList(fighter.equipment)}</dd><dt>Special abilities</dt><dd>${itemList(fighter.specialAbilities)}</dd></dl></section><button class="primary" id="arena">Enter Arena</button><p class="footer-note">Your fighter is saved on this device. Movement and combat basics are ready in the training arena.</p></main>`;
-  root.querySelector('#home')!.addEventListener('click', renderStart);
-  root.querySelector('#arena')!.addEventListener('click', renderArena);
+export function renderHub(fighter: Fighter, notice?: string): void {
+  const game = storage.loadGame() ?? { fighter, career: { rankPoints: 0, wins: 0, losses: 0, draws: 0, history: [], offerSeed: fighter.meta.seed, pendingMatch: null } };
+  const next = Object.entries({ Rookie: 0, Bronze: 5, Silver: 15, Gold: 30, Platinum: 50, Elite: 80, Champion: 120 }).find(([, points]) => points > game.career.rankPoints);
+  root.innerHTML = `<main class="shell"><div class="eyebrow">ARENA HUB</div><h1>${escapeHtml(fighter.name)}</h1>${notice ? `<p class="save-note">${escapeHtml(notice)}</p>` : ''}<section class="card"><h2>${escapeHtml(fighter.progression.rank)}</h2><p>${game.career.rankPoints} rank points${next ? ` · ${next[1] - game.career.rankPoints} to ${next[0]}` : ' · Champion'}</p><dl><dt>Credits</dt><dd>${whole(fighter.progression.currency)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section><div class="actions"><button class="primary" id="offers">Find Match</button><button id="training">Training Room</button><button id="history">History</button><button id="profile">Fighter Profile</button></div></main>`;
+  root.querySelector('#offers')!.addEventListener('click', () => renderOffers(game));
+  root.querySelector('#training')!.addEventListener('click', () => renderArena());
+  root.querySelector('#history')!.addEventListener('click', () => renderHistory(game));
+  root.querySelector('#profile')!.addEventListener('click', () => renderProfile(fighter));
+}
+function renderOffers(game: CareerState): void { const offers = createOffers(game.career.offerSeed, game.fighter, game.career); root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">FIND MATCH</div><h1>Choose your risk.</h1><div class="actions">${offers.map((o) => `<article class="card"><h2>${o.id === 'open-ring' ? 'Open Ring' : o.id === 'rookie-bout' ? 'Rookie Bout' : 'Veteran Bout'}</h2><p>${escapeHtml(o.opponent)} · ${o.id === 'open-ring' ? 'Open Ring' : tierLabel(o.tier)}${o.dangerous ? ' · Dangerous' : ''}</p><p>Fee ${whole(o.fee)} · Purse ${whole(o.purse)}</p><p>Win pays about ${o.fee * 2 + Math.round(o.purse * .1) - o.fee}–${o.fee * 2 + Math.round(o.purse * .2) - o.fee} net</p><button data-offer="${o.id}" ${game.fighter.progression.currency < o.fee ? 'disabled title="Not enough credits"' : ''}>Accept</button></article>`).join('')}</div></main>`; root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter)); root.querySelectorAll<HTMLButtonElement>('[data-offer]').forEach((button) => button.addEventListener('click', () => { const offer = offers.find((o) => o.id === button.dataset.offer)!; const started = startMatch(game, offer); storage.saveGame(started); renderArena(started.fighter, offer); })); }
+function renderHistory(game: CareerState): void { root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">HISTORY</div><h1>Match history</h1>${game.career.history.slice().reverse().map((h) => `<section class="card"><strong>${h.outcome.toUpperCase()} · ${escapeHtml(h.opponent)}</strong><p>${h.tier === 'rookie' ? 'Rookie bout' : 'Veteran bout'} · ${h.netCurrency >= 0 ? '+' : ''}${whole(h.netCurrency)} credits · ${h.durationSeconds.toFixed(1)}s · rank ${h.rankPointsDelta >= 0 ? '+' : ''}${h.rankPointsDelta}</p></section>`).join('') || '<p>No matches yet.</p>'}</main>`; root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter)); }
+
+function renderResult(state: CareerState, summary: { outcome: string; breakdown: string[]; promotedTo?: string }): void {
+  const title = summary.outcome === 'win' ? 'Victory' : summary.outcome === 'loss' ? 'Defeat' : summary.outcome === 'draw' ? 'Draw' : 'Forfeit';
+  root.innerHTML = `<main class="shell"><div class="eyebrow">MATCH RESULT</div><h1>${title}</h1><section class="card">${summary.breakdown.map((line) => `<p>${escapeHtml(line)}</p>`).join('')}<p>Credits: ${whole(state.fighter.progression.currency)}</p><p>Rank points: ${state.career.rankPoints}</p>${summary.promotedTo ? `<strong>Promoted to ${escapeHtml(summary.promotedTo)}</strong>` : ''}</section><div class="actions"><button class="primary" id="hub">Back to Hub</button><button id="again">Fight Again</button></div></main>`;
+  root.querySelector('#hub')!.addEventListener('click', () => renderHub(state.fighter));
+  root.querySelector('#again')!.addEventListener('click', () => renderOffers(state));
 }
 
-const arenaMarkup = (fighterName: string): string => `<main class="arena-screen">
-  <button class="leave" id="leave">Leave</button>
-  <div class="opponent-toggle" role="group" aria-label="Training target">
-    <button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="rookie" class="selected" aria-pressed="true">Rookie</button><button data-mode="veteran" aria-pressed="false">Veteran</button>
-  </div>
+export function renderProfile(fighter: Fighter): void {
+  const itemList = (values: string[]) => values.length ? values.map(escapeHtml).join(', ') : 'None';
+  root.innerHTML = `<main class="shell"><button class="back" id="home">← Hub</button><div class="profile-heading"><div><div class="eyebrow">FIGHTER PROFILE</div><h1>${escapeHtml(fighter.name)}</h1><p class="muted">${escapeHtml(fighter.species)} · ${escapeHtml(fighter.origin)}</p></div><div class="badge">${escapeHtml(fighter.progression.rank)}</div></div><div class="condition"><span class="pulse"></span><div><strong>${describeCondition(fighter)}</strong><small>Current condition</small></div></div><section class="card"><h2>Identity</h2><dl><dt>Background</dt><dd>${escapeHtml(fighter.background)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Titles</dt><dd>${itemList(fighter.progression.titles)}</dd><dt>Currency</dt><dd>${whole(fighter.progression.currency)} credits</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section><section class="card"><h2>Combat identity</h2><dl><dt>Primary style</dt><dd>${escapeHtml(fighter.primaryStyle)}</dd><dt>Secondary styles</dt><dd>${itemList(fighter.secondaryStyles)}</dd><dt>Power system</dt><dd>${escapeHtml(fighter.powerSystem)}</dd><dt>Weapons</dt><dd>${itemList(fighter.weapons)}</dd><dt>Equipment</dt><dd>${itemList(fighter.equipment)}</dd><dt>Special abilities</dt><dd>${itemList(fighter.specialAbilities)}</dd></dl></section><p class="footer-note">Your fighter is saved on this device. Enter the Training Room from the Arena Hub.</p></main>`;
+  root.querySelector('#home')!.addEventListener('click', () => renderHub(fighter));
+}
+
+const arenaMarkup = (fighterName: string, official = false, tier = 'rookie'): string => { const controls = official ? '<div class="match-lock">OFFICIAL MATCH · ARENA LOCK</div>' : '<button class="leave" id="leave">Leave</button><div class="opponent-toggle" role="group" aria-label="Training target"><button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="rookie" class="selected" aria-pressed="true">Rookie</button><button data-mode="veteran" aria-pressed="false">Veteran</button></div>'; return `<main class="arena-screen">
+  ${controls}
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
@@ -102,15 +125,16 @@ const arenaMarkup = (fighterName: string): string => `<main class="arena-screen"
     <button class="combat-button block-button" data-control="block" aria-label="Hold to block">Block<kbd>K</kbd></button>
     <button class="combat-button dodge-button" data-control="dodge" aria-label="Dodge">Dodge<kbd>L</kbd></button>
   </div>
-</main>`;
+</main>`; }
 
-export function renderArena(): void {
-  const fighter = storage.load();
+export function renderArena(officialFighter?: Fighter, officialOffer?: import('../sim').Offer): void {
+  const fighter = officialFighter ?? storage.load();
   if (!fighter) {
     renderStart();
     return;
   }
-  root.innerHTML = arenaMarkup(fighter.name);
+  const official = Boolean(officialOffer);
+  root.innerHTML = arenaMarkup(fighter.name, official, officialOffer?.tier);
 
   const canvas = root.querySelector<HTMLCanvasElement>('#arena-canvas')!;
   const ctx = canvas.getContext('2d')!;
@@ -130,14 +154,15 @@ export function renderArena(): void {
   };
 
   type ArenaMode = 'dummy' | 'rookie' | 'veteran';
-  let mode: ArenaMode = 'rookie';
+  let mode: ArenaMode = officialOffer?.tier === 'veteran' ? 'veteran' : official ? 'rookie' : 'rookie';
   let state = createOpponentCombatState(fighter.hiddenStats);
-  let aiState: AiState = createAiState(fighter.meta.seed, state.player);
+  let aiState: AiState = createAiState(officialOffer?.matchSeed ?? fighter.meta.seed, state.player, mode === 'veteran' ? VETERAN_PROFILE : ROOKIE_PROFILE);
   let accumulator = 0;
   let last = performance.now();
   let frame = 0;
   let joystickVector = { x: 0, z: 0 };
   let joystickPointer: number | null = null;
+  let officialSettled = false;
   let attackQueued = false;
   let dodgeQueued = false;
   let blockPointer: number | null = null;
@@ -482,7 +507,7 @@ export function renderArena(): void {
     }
     draw();
   };
-  root.querySelector('#reset-fight')!.addEventListener('click', resetFight);
+  root.querySelector('#reset-fight')?.addEventListener('click', resetFight);
   for (const button of modeButtons) {
     button.addEventListener('click', () => {
       const selectedMode = button.dataset.mode;
@@ -497,7 +522,7 @@ export function renderArena(): void {
     cleanup.forEach((remove) => remove());
     renderProfile(fighter);
   };
-  root.querySelector('#leave')!.addEventListener('click', leave);
+  root.querySelector('#leave')?.addEventListener('click', leave);
 
   const loop = (now: number) => {
     const elapsed = Math.max(0, (now - last) / 1000);
@@ -537,6 +562,10 @@ export function renderArena(): void {
       dodgeFlashTicks.dummy = Math.max(0, dodgeFlashTicks.dummy - 1);
       guardBreakFlashTicks.player = Math.max(0, guardBreakFlashTicks.player - 1);
       guardBreakFlashTicks.dummy = Math.max(0, guardBreakFlashTicks.dummy - 1);
+      if (officialOffer && !officialSettled) {
+        const outcome = resolveFightResult(state.player.health, state.dummy.health, state.tick);
+        if (outcome) { officialSettled = true; const game = storage.loadGame(); if (game) { const settled = settleMatch(game, outcome, state.tick); storage.saveGame(settled.state); cancelAnimationFrame(frame); renderResult(settled.state, settled.summary); return; } }
+      }
     }
     draw();
     frame = requestAnimationFrame(loop);

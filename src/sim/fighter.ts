@@ -24,7 +24,7 @@ export interface Fighter extends FighterInput {
   undergroundAccess: boolean;
   hiddenStats: HiddenStats;
   hiddenTraits: HiddenTraits;
-  progression: { rank: 'Rookie'; reputation: 'Unknown'; titles: string[]; currency: number; housing: string };
+  progression: { rank: 'Rookie' | 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Elite' | 'Champion'; reputation: 'Unknown' | string; titles: string[]; currency: number; housing: string };
   condition: { injuries: string[]; scars: string[] };
   meta: { id: string; schemaVersion: number; createdAt: string; seed: number };
 }
@@ -64,7 +64,7 @@ export function createFighter(input: FighterInput, seed: number): Fighter {
     ...normalized,
     hiddenStats,
     hiddenTraits,
-    progression: { rank: 'Rookie', reputation: 'Unknown', titles: [], currency: 100, housing: 'Shared quarters' },
+    progression: { rank: 'Rookie', reputation: 'Unknown', titles: [], currency: 100, housing: 'None' },
     condition: { injuries: [], scars: [] },
     meta: { id, schemaVersion: FIGHTER_SCHEMA_VERSION, createdAt, seed: seed >>> 0 },
   };
