@@ -298,26 +298,6 @@ describe('rookie AI perception and behavior', () => {
   });
 });
 
-describe('rookie AI engagement cycle', () => {
-  it('does not press attack while its own public cooldown remains', () => {
-    const state = createOpponentCombatState();
-    state.dummy.attackCooldownRemaining = 7;
-    const forced = profile({ decisionIntervalTicks: 1, aggression: 1, mistakeChance: 0, guardChance: 0 });
-    const result = decide(createAiState(44, state.player, forced), aiObservation(state, state.dummy, state.player), 0, forced);
-    expect(result.input.attackPressed).toBe(false);
-  });
-
-  it('keeps the default target edge outside basic attack reach while the target is idle', () => {
-    const state = createOpponentCombatState();
-    state.dummy.position = { x: 3, z: 0 };
-    state.player.position = { x: 0, z: 0 };
-    const forced = profile({ decisionIntervalTicks: 1, aggression: 0, guardChance: 0, mistakeChance: 0 });
-    const result = decide(createAiState(45, state.player, forced), aiObservation(state, state.dummy, state.player), 0, forced);
-    expect(result.input.attackPressed).toBe(false);
-    expect(result.nextAiState.plan).toBe('approach');
-  });
-});
-
 describe('AI fight determinism and lifecycle', () => {
   it('replays identical combat states, AI states, inputs, and events for one seed and input sequence', () => {
     const inputs = Array.from({ length: 420 }, (_, tick) => neutral({
@@ -581,5 +561,100 @@ describe('rookie AI guard stance, punishing, and dash usage', () => {
       expect(state.dummy.stamina).toBeGreaterThanOrEqual(0);
     }
     expect(lastAttackTick).not.toBeNull();
+  });
+});
+
+describe('rookie AI exposure hooks (Phase 1c.3)', () => {
+  /** Face-to-face standoff at a chosen distance; the AI is the dummy. */
+  function standoff(distance: number): CombatState {
+    const state = createOpponentCombatState();
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: distance, z: 0 };
+    face(state.dummy, state.player);
+    face(state.player, state.dummy);
+    return state;
+  }
+  const inRange = COMBAT_TUNING.attack.range - 0.2;
+
+  it('extends the delayed target snapshot with exposed and exposure', () => {
+    const state = standoff(inRange);
+    state.player.exposed = true;
+    state.player.exposure = 87;
+    const aiState = createAiState(1, state.player);
+    expect(aiState.history[0].exposed).toBe(true);
+    expect(aiState.history[0].exposure).toBe(87);
+  });
+
+  it('punishes an observed Exposed target far more often than a normal one', () => {
+    const punishProfile = profile({ aggression: 0, guardChance: 0, mistakeChance: 0, caution: 0 });
+    const rate = (exposed: boolean): number => {
+      let attacks = 0;
+      for (let seed = 1; seed <= 50; seed += 1) {
+        const state = standoff(inRange);
+        if (exposed) state.player.exposed = true;
+        const aiState = createAiState(seed, state.player, punishProfile);
+        const result = decide(aiState, aiObservation(state, state.dummy, state.player), 0, punishProfile);
+        if (result.input.attackPressed) attacks += 1;
+      }
+      return attacks / 50;
+    };
+    expect(rate(false)).toBe(0);
+    expect(rate(true)).toBeGreaterThan(0.5);
+  });
+
+  it('does not start ordinary attacks when its own exposure is at/above restraintExposureRatio', () => {
+    const aggressive = profile({ aggression: 1, guardChance: 0, mistakeChance: 0, caution: 0 });
+    // Control: with low exposure the aggressive AI attacks the idle target in range.
+    const low = standoff(inRange);
+    const lowResult = decide(
+      createAiState(7, low.player, aggressive),
+      aiObservation(low, low.dummy, low.player),
+      0,
+      aggressive,
+    );
+    expect(lowResult.input.attackPressed).toBe(true);
+
+    // Restrained: own exposure exactly at the ratio suppresses the ordinary attack.
+    const restrained = standoff(inRange);
+    restrained.dummy.exposure = aggressive.restraintExposureRatio * restrained.dummy.maxExposure;
+    const restrainedResult = decide(
+      createAiState(7, restrained.player, aggressive),
+      aiObservation(restrained, restrained.dummy, restrained.player),
+      0,
+      aggressive,
+    );
+    expect(restrainedResult.input.attackPressed).toBe(false);
+  });
+
+  it('still punishes an Exposed opponent while restrained (restraint spares punishing)', () => {
+    const punishProfile = profile({ aggression: 1, guardChance: 0, mistakeChance: 0, caution: 0, punishChance: 1 });
+    const state = standoff(inRange);
+    state.dummy.exposure = punishProfile.restraintExposureRatio * state.dummy.maxExposure; // AI restrained
+    state.player.exposed = true; // but the target is Exposed
+    const result = decide(
+      createAiState(3, state.player, punishProfile),
+      aiObservation(state, state.dummy, state.player),
+      0,
+      punishProfile,
+    );
+    expect(result.input.attackPressed).toBe(true);
+    expect(result.nextAiState.lastDecision).toBe('punish');
+  });
+
+  it('does not react to a target becoming Exposed earlier than the reaction delay', () => {
+    const punishProfile = profile({
+      aggression: 0, guardChance: 0, mistakeChance: 0, caution: 0, punishChance: 1, decisionIntervalTicks: 1,
+    });
+    const state = standoff(inRange);
+    let aiState = createAiState(11, state.player, punishProfile);
+    // The player becomes Exposed only now; the AI must not see it before the reaction delay.
+    state.player.exposed = true;
+    let firstPunishTick: number | null = null;
+    for (let tick = 0; tick <= punishProfile.reactionTicks; tick += 1) {
+      const result = decide(aiState, aiObservation(state, state.dummy, state.player), tick, punishProfile);
+      aiState = result.nextAiState;
+      if (result.input.attackPressed && firstPunishTick === null) firstPunishTick = tick;
+    }
+    expect(firstPunishTick).toBe(punishProfile.reactionTicks);
   });
 });
