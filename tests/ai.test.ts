@@ -151,6 +151,8 @@ describe('rookie AI perception and behavior', () => {
       aggression: 0,
       caution: 1,
       mistakeChance: 0,
+      // Anticipation guard off: this test measures pure reaction to an observed attack.
+      guardChance: 0,
     });
     let aiState = createAiState(8, state.player, forcedDefense);
     state.player.currentAction = { type: 'attack', phase: 'startup' };
@@ -208,6 +210,7 @@ describe('rookie AI perception and behavior', () => {
       decisionIntervalTicks: 1,
       aggression: 0,
       mistakeChance: 0,
+      guardChance: 0,
     });
     let defended = 0;
     let blocked = 0;
@@ -246,6 +249,7 @@ describe('rookie AI perception and behavior', () => {
       decisionIntervalTicks: 1,
       aggression: 0,
       caution: 1,
+      guardChance: 0,
     });
 
     for (let seed = 1; seed <= samples; seed += 1) {
@@ -379,5 +383,183 @@ describe('AI fight determinism and lifecycle', () => {
     expect(legacy).toEqual(explicit);
     expect(legacy.state.dummy.position).toEqual(state.dummy.position);
     expect(legacy.state.dummy.currentAction.type).toBe('idle');
+  });
+});
+
+describe('rookie AI guard stance, punishing, and dash usage', () => {
+  /** Place the AI at a chosen distance from an idle player, both facing each other. */
+  function standoff(distance: number): CombatState {
+    const state = createOpponentCombatState();
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: distance, z: 0 };
+    face(state.dummy, state.player);
+    face(state.player, state.dummy);
+    return state;
+  }
+
+  const threatDistance = COMBAT_TUNING.attack.range + ROOKIE_PROFILE.defenseRangeMargin - 0.1;
+
+  it('enters an anticipation guard in some but not all decisions across fifty seeds', () => {
+    let guarded = 0;
+    for (let seed = 1; seed <= 50; seed += 1) {
+      const state = standoff(threatDistance);
+      const result = decide(
+        createAiState(seed, state.player),
+        aiObservation(state, state.dummy, state.player),
+        0,
+      );
+      if (result.nextAiState.lastDecision === 'guard-stance') {
+        guarded += 1;
+        expect(result.input.blockHeld).toBe(true);
+      }
+    }
+    expect(guarded).toBeGreaterThan(0);
+    expect(guarded).toBeLessThan(50);
+  });
+
+  it('holds the guard for a bounded number of ticks and then releases it', () => {
+    const guardProfile = profile({ aggression: 0, guardChance: 1, caution: 1, mistakeChance: 0 });
+    const state = standoff(threatDistance);
+    const result = decide(
+      createAiState(5, state.player, guardProfile),
+      aiObservation(state, state.dummy, state.player),
+      0,
+      guardProfile,
+    );
+    expect(result.nextAiState.lastDecision).toBe('guard-stance');
+    const hold = result.nextAiState.blockUntilTick;
+    expect(hold).toBeGreaterThanOrEqual(guardProfile.guardHoldTicksMin);
+    expect(hold).toBeLessThanOrEqual(guardProfile.guardHoldTicksMax);
+    expect(result.nextAiState.guardReadyTick).toBe(hold + guardProfile.guardGapTicks);
+  });
+
+  it('releases a guard early when the target is observed far away repeatedly', () => {
+    const guardProfile = profile({ aggression: 0, guardChance: 1, caution: 1, decisionIntervalTicks: 1 });
+    let state = standoff(threatDistance);
+    let aiState = createAiState(5, state.player, guardProfile);
+    let result = decide(aiState, aiObservation(state, state.dummy, state.player), 0, guardProfile);
+    expect(result.input.blockHeld).toBe(true);
+    aiState = result.nextAiState;
+    state = standoff(9);
+    let tick = 1;
+    for (let index = 0; index < guardProfile.guardReleaseObservations; index += 1) {
+      result = decide(aiState, aiObservation(state, state.dummy, state.player), tick, guardProfile);
+      aiState = result.nextAiState;
+      tick += 1;
+    }
+    expect(aiState.blockUntilTick).toBeLessThanOrEqual(tick);
+    expect(result.input.blockHeld).toBe(false);
+  });
+
+  it('never chooses to guard at very low endurance', () => {
+    const guardProfile = profile({ aggression: 0, guardChance: 1, caution: 1, mistakeChance: 0 });
+    for (let seed = 1; seed <= 25; seed += 1) {
+      const state = standoff(threatDistance);
+      state.dummy.endurance = state.dummy.maxEndurance * (guardProfile.minEnduranceRatioToGuard - 0.05);
+      const result = decide(
+        createAiState(seed, state.player, guardProfile),
+        aiObservation(state, state.dummy, state.player),
+        0,
+        guardProfile,
+      );
+      expect(result.nextAiState.lastDecision).not.toBe('guard-stance');
+    }
+  });
+
+  it('punishes an observed staggered target far more often than an idle one', () => {
+    const punishProfile = profile({ aggression: 0, guardChance: 0, mistakeChance: 0, caution: 0 });
+    const rate = (stagger: boolean): number => {
+      let attacks = 0;
+      for (let seed = 1; seed <= 50; seed += 1) {
+        const state = standoff(COMBAT_TUNING.attack.range - 0.2);
+        if (stagger) state.player.currentAction = { type: 'stagger', phase: 'recovery' };
+        const aiState = createAiState(seed, state.player, punishProfile);
+        const result = decide(aiState, aiObservation(state, state.dummy, state.player), 0, punishProfile);
+        if (result.input.attackPressed) attacks += 1;
+      }
+      return attacks / 50;
+    };
+    const baseline = rate(false);
+    const punished = rate(true);
+    expect(baseline).toBe(0);
+    expect(punished).toBeGreaterThan(0.5);
+  });
+
+  it('only punishes through the delayed observation, never the current tick', () => {
+    const punishProfile = profile({
+      aggression: 0, guardChance: 0, mistakeChance: 0, caution: 0, punishChance: 1, decisionIntervalTicks: 1,
+    });
+    const state = standoff(COMBAT_TUNING.attack.range - 0.2);
+    let aiState = createAiState(11, state.player, punishProfile);
+    // The player becomes staggered only now; the AI must not see it before the reaction delay.
+    state.player.currentAction = { type: 'stagger', phase: 'recovery' };
+    let firstPunishTick: number | null = null;
+    for (let tick = 0; tick <= punishProfile.reactionTicks; tick += 1) {
+      const result = decide(aiState, aiObservation(state, state.dummy, state.player), tick, punishProfile);
+      aiState = result.nextAiState;
+      if (result.input.attackPressed && firstPunishTick === null) firstPunishTick = tick;
+    }
+    expect(firstPunishTick).toBe(punishProfile.reactionTicks);
+  });
+
+  it('gap-close dashes toward a far target and never below the stamina floor', () => {
+    const dashProfile = profile({ guardChance: 0, dashCloseChance: 1, decisionIntervalTicks: 1 });
+    const state = standoff(dashProfile.dashCloseDistance + 2);
+    const result = decide(
+      createAiState(3, state.player, dashProfile),
+      aiObservation(state, state.dummy, state.player),
+      0,
+      dashProfile,
+    );
+    expect(result.nextAiState.lastDecision).toBe('dash-close');
+    expect(result.input.dodgePressed).toBe(true);
+    // The dash vector points at the target, which sits in -x from the AI.
+    expect(result.input.x).toBeLessThan(0);
+
+    const tired = standoff(dashProfile.dashCloseDistance + 2);
+    tired.dummy.stamina = tired.dummy.maxStamina * dashProfile.dashMinStaminaRatio
+      + COMBAT_TUNING.dodge.staminaCost - 0.01;
+    const noDash = decide(
+      createAiState(3, tired.player, dashProfile),
+      aiObservation(tired, tired.dummy, tired.player),
+      0,
+      dashProfile,
+    );
+    expect(noDash.input.dodgePressed).toBe(false);
+    expect(noDash.nextAiState.lastDecision).not.toBe('dash-close');
+  });
+
+  it('does not gap-close dash while the target is close', () => {
+    const dashProfile = profile({ guardChance: 0, dashCloseChance: 1 });
+    const state = standoff(dashProfile.dashCloseDistance - 0.5);
+    const result = decide(
+      createAiState(3, state.player, dashProfile),
+      aiObservation(state, state.dummy, state.player),
+      0,
+      dashProfile,
+    );
+    expect(result.nextAiState.lastDecision).not.toBe('dash-close');
+  });
+
+  it('obeys the shared attack interval over a long fight', () => {
+    const interval = COMBAT_TUNING.attack.minIntervalTicks;
+    let state = createOpponentCombatState();
+    state.player.health = 1e6;
+    state.dummy.health = 1e6;
+    let aiState = createAiState(21, state.player);
+    let lastAttackTick: number | null = null;
+    for (let tick = 0; tick < 1200; tick += 1) {
+      const result = stepCombatWithAi(state, neutral(), aiState);
+      state = result.state;
+      aiState = result.aiState;
+      const started = result.events.some((event) => event.type === 'ACTION_STARTED'
+        && event.actorId === 'dummy' && event.action === 'attack');
+      if (started) {
+        if (lastAttackTick !== null) expect(state.tick - lastAttackTick).toBeGreaterThanOrEqual(interval);
+        lastAttackTick = state.tick;
+      }
+      expect(state.dummy.stamina).toBeGreaterThanOrEqual(0);
+    }
+    expect(lastAttackTick).not.toBeNull();
   });
 });

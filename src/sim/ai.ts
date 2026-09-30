@@ -36,6 +36,21 @@ export interface AiProfile {
   overcommitWindowTicks: number;
   wallBuffer: number;
   circleSwitchChance: number;
+  /** Anticipation guard: held before an attack is observed, not in reaction to one. */
+  guardChance: number;
+  guardHoldTicksMin: number;
+  guardHoldTicksMax: number;
+  /** Ticks after a guard hold ends before another anticipation guard may start. */
+  guardGapTicks: number;
+  /** Consecutive out-of-threat-range observations that release a guard hold early. */
+  guardReleaseObservations: number;
+  /** Below this endurance ratio the AI stops choosing to guard. */
+  minEnduranceRatioToGuard: number;
+  /** Attack chance against an observed staggered / recovering target in range. */
+  punishChance: number;
+  dashCloseDistance: number;
+  dashCloseChance: number;
+  dashMinStaminaRatio: number;
 }
 
 export const ROOKIE_PROFILE: Readonly<AiProfile> = {
@@ -61,6 +76,16 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   overcommitWindowTicks: 6,
   wallBuffer: 0.35,
   circleSwitchChance: 0.08,
+  guardChance: 0.3,
+  guardHoldTicksMin: 18,
+  guardHoldTicksMax: 40,
+  guardGapTicks: 20,
+  guardReleaseObservations: 2,
+  minEnduranceRatioToGuard: 0.25,
+  punishChance: 0.85,
+  dashCloseDistance: 4.5,
+  dashCloseChance: 0.45,
+  dashMinStaminaRatio: 0.35,
 } as const;
 
 export type StaminaBand = 'low' | 'ok';
@@ -97,6 +122,9 @@ export type AiDecisionReason =
   | 'attack'
   | 'defend-block'
   | 'defend-dodge'
+  | 'guard-stance'
+  | 'punish'
+  | 'dash-close'
   | 'mistake-outside-attack'
   | 'mistake-overblock'
   | 'mistake-overcommit';
@@ -107,6 +135,10 @@ export interface AiState {
   history: AiTargetSnapshot[];
   nextDecisionTick: number;
   blockUntilTick: number;
+  /** Earliest tick a new anticipation guard may start (hold end + gap). */
+  guardReadyTick: number;
+  /** Consecutive decisions where the observed target was outside threat range. */
+  farObservations: number;
   retreatUntilTick: number;
   circleDirection: -1 | 1;
   heldMovement: Vec2;
@@ -166,6 +198,8 @@ export function createAiState(
     history: Array.from({ length: historyLength }, () => cloneSnapshot(initial)),
     nextDecisionTick: 0,
     blockUntilTick: 0,
+    guardReadyTick: 0,
+    farObservations: 0,
     retreatUntilTick: 0,
     circleDirection: 1,
     heldMovement: { x: 0, z: 0 },
@@ -296,6 +330,10 @@ export function decide(
   const mistakeRoll = random();
   const defenseRoll = random();
   const circleRoll = random();
+  const guardRoll = random();
+  const guardHoldRoll = random();
+  const punishRoll = random();
+  const dashRoll = random();
 
   let circleDirection = aiState.circleDirection;
   if (circleRoll < profile.circleSwitchChance) circleDirection = circleDirection === 1 ? -1 : 1;
@@ -323,20 +361,43 @@ export function decide(
   heldMovement = steerInsideBounds(heldMovement, self, observation.bounds, profile.wallBuffer);
 
   let blockUntilTick = aiState.blockUntilTick;
+  let guardReadyTick = aiState.guardReadyTick;
+  const threatRange = COMBAT_TUNING.attack.range + profile.defenseRangeMargin;
+  // A guard held while the target keeps being observed far away is dropped after a few looks.
+  let farObservations = distance > threatRange ? aiState.farObservations + 1 : 0;
+  if (tick < blockUntilTick && farObservations >= profile.guardReleaseObservations) {
+    blockUntilTick = tick;
+    guardReadyTick = tick + profile.guardGapTicks;
+    farObservations = 0;
+  }
   const input: CombatInput = {
     ...NEUTRAL_COMBAT_INPUT,
     ...heldMovement,
     blockHeld: tick < blockUntilTick && self.stamina >= COMBAT_TUNING.block.minimumStartStamina,
   };
   const mistakes = { ...aiState.mistakes };
-  const enoughToAttack = self.stamina >= COMBAT_TUNING.attack.staminaCost;
+  const attackProfile = COMBAT_TUNING.attack;
+  const enoughToAttack = self.stamina >= attackProfile.staminaCost;
   const enoughToDodge = self.stamina >= COMBAT_TUNING.dodge.staminaCost;
   const idle = self.currentAction.type === 'idle';
+  const canAttackNow = idle && enoughToAttack && self.attackCooldownRemaining <= 0;
   const observedStartup = target.currentAction.type === 'attack'
     && target.currentAction.phase === 'startup';
-  const defensiveRange = distance <= COMBAT_TUNING.attack.range + profile.defenseRangeMargin;
+  const defensiveRange = distance <= threatRange;
+  const enduranceRatio = self.maxEndurance > 0 ? self.endurance / self.maxEndurance : 0;
+  // Punishable states, as seen through the reaction delay: never current-tick knowledge.
+  const observedPunishable = target.currentAction.type === 'stagger'
+    || (target.currentAction.type === 'attack' && target.currentAction.phase === 'recovery')
+    || (target.currentAction.type === 'dodge' && target.currentAction.phase === 'recovery');
+  const dashLeavesEnoughStamina = self.maxStamina > 0
+    && (self.stamina - COMBAT_TUNING.dodge.staminaCost) / self.maxStamina >= profile.dashMinStaminaRatio;
+  const staminaRatioOkForDash = staminaRatio >= profile.dashMinStaminaRatio;
 
-  if (!retreating && idle && observedStartup && defensiveRange && cautionRoll < profile.caution) {
+  if (!retreating && canAttackNow && observedPunishable && distance <= attackProfile.range
+    && punishRoll < profile.punishChance) {
+    input.attackPressed = true;
+    reason = 'punish';
+  } else if (!retreating && idle && observedStartup && defensiveRange && cautionRoll < profile.caution) {
     if (defenseRoll < profile.dodgeShare && enoughToDodge) {
       const away = retreatMovement(self, target, profile.retreatStrength);
       input.x = away.x;
@@ -346,6 +407,7 @@ export function decide(
     } else if (self.stamina >= COMBAT_TUNING.block.minimumStartStamina) {
       const overblock = mistakeRoll < profile.mistakeChance;
       blockUntilTick = tick + (overblock ? profile.mistakeBlockHoldTicks : profile.normalBlockHoldTicks);
+      guardReadyTick = blockUntilTick + profile.guardGapTicks;
       input.blockHeld = true;
       if (overblock) {
         mistakes.overblock += 1;
@@ -354,13 +416,46 @@ export function decide(
         reason = 'defend-block';
       }
     }
+  } else if (
+    // Anticipation guard: no attack has been observed, the target is simply close enough.
+    !retreating
+    && idle
+    && defensiveRange
+    && tick >= guardReadyTick
+    && tick >= blockUntilTick
+    && enduranceRatio >= profile.minEnduranceRatioToGuard
+    && self.stamina >= COMBAT_TUNING.block.minimumStartStamina
+    && guardRoll < profile.guardChance * profile.caution * 2
+  ) {
+    const span = Math.max(0, profile.guardHoldTicksMax - profile.guardHoldTicksMin);
+    const hold = profile.guardHoldTicksMin + Math.floor(guardHoldRoll * (span + 1));
+    blockUntilTick = tick + hold;
+    guardReadyTick = blockUntilTick + profile.guardGapTicks;
+    input.blockHeld = true;
+    reason = 'guard-stance';
+  } else if (
+    // Gap-close dash: only when clearly far away and stamina stays above the floor afterwards.
+    !retreating
+    && idle
+    && distance > profile.dashCloseDistance
+    && enoughToDodge
+    && staminaRatioOkForDash
+    && dashLeavesEnoughStamina
+    && dashRoll < profile.dashCloseChance
+  ) {
+    const toward = normalized(towardTarget);
+    input.x = toward.x;
+    input.z = toward.z;
+    input.dodgePressed = true;
+    heldMovement = steerInsideBounds(toward, self, observation.bounds, profile.wallBuffer);
+    reason = 'dash-close';
   } else if (!retreating && idle && enoughToAttack) {
-    if (distance <= COMBAT_TUNING.attack.range && aggressionRoll < profile.aggression) {
+    if (distance <= attackProfile.range && aggressionRoll < profile.aggression) {
       input.attackPressed = true;
       reason = 'attack';
     } else if (
-      distance > COMBAT_TUNING.attack.range
-      && distance <= COMBAT_TUNING.attack.range + profile.mistakeRangeMargin
+      distance > attackProfile.range
+      && distance <= attackProfile.range + profile.mistakeRangeMargin
       && mistakeRoll < profile.mistakeChance
     ) {
       input.attackPressed = true;
@@ -372,9 +467,9 @@ export function decide(
     && self.currentAction.type === 'attack'
     && self.currentAction.phase === 'recovery'
     && enoughToAttack
-    && COMBAT_TUNING.attack.startupTicks
-      + COMBAT_TUNING.attack.activeTicks
-      + COMBAT_TUNING.attack.recoveryTicks
+    && attackProfile.startupTicks
+      + attackProfile.activeTicks
+      + attackProfile.recoveryTicks
       - self.actionTick <= profile.overcommitWindowTicks
     && mistakeRoll < profile.mistakeChance
   ) {
@@ -389,6 +484,8 @@ export function decide(
     rngState,
     nextDecisionTick: tick + profile.decisionIntervalTicks,
     blockUntilTick,
+    guardReadyTick,
+    farObservations,
     retreatUntilTick,
     circleDirection,
     heldMovement,

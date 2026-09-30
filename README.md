@@ -1,6 +1,6 @@
 # MULTIDIMENSIONAL ARENA
 
-MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1c is implemented:** create/save a fighter, enter a fixed-timestep 2.5D training arena, and use movement, attack, hold-to-block, and dodge against either a stationary dummy or the seeded Rookie sparring opponent. Health, stamina, action timing, input buffering, AI decisions, and combat events run in the deterministic DOM-free simulation. The persistent world remains planned.
+MULTIDIMENSIONAL ARENA is intended to become a persistent open-world combat simulation RPG. **Phase 1c.1 is implemented:** create/save a fighter, enter a fixed-timestep 2.5D training arena, and use movement, attack, hold-to-block, and dodge against either a stationary dummy or the seeded Rookie sparring opponent. Health, stamina, endurance (the guard resource), action timing, the per-attack minimum interval, input buffering, AI decisions, and combat events run in the deterministic DOM-free simulation. The persistent world remains planned.
 
 ## Stack
 
@@ -37,6 +37,10 @@ npm run build  # type-check and create dist/
 - `src/storage/` versioned local save adapter
 - `tests/` simulation, input, storage, and DOM-boundary tests
 - `docs/decisions/` accepted architecture and simulation decisions
+
+Blocking a frontal hit costs **endurance**, not health and not stamina; when endurance hits zero the guard breaks and the defender is staggered for 30 ticks at full damage. Attacks obey a per-attack minimum interval (34 ticks for the basic attack profile), shown as a fill on the Attack button. See `docs/decisions/006-endurance-and-attack-interval.md`.
+
+Heavy attacks, a weapon/equipment system, parry or perfect block, and adaptive AI are **planned only**.
 
 Combat state is deliberately session-only. Entering the arena creates a fresh fight and does not change the version 1 fighter save schema or persist health/stamina.
 
