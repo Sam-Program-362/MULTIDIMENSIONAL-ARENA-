@@ -491,7 +491,7 @@ describe('endurance and guard break', () => {
     expect(result.events.find((event) => event.type === 'DAMAGE_APPLIED')?.amount).toBe(COMBAT_TUNING.attack.damage);
   });
 
-  it('staggers for the configured duration, refuses input, and restores half endurance', () => {
+  it('staggers for the configured duration, refuses input, and ends at the reset ratio (empty)', () => {
     const state = brokenBlockSetup();
     let current = pairStep(state, { blockHeld: true }).state;
     // Keep the attacker harmless for the rest of the stagger.
@@ -562,16 +562,32 @@ describe('endurance and guard break', () => {
     expect(current.dummy.endurance).toBe(current.dummy.maxEndurance);
   });
 
-  it('does not block a hit from behind and does not drain endurance', () => {
+  it('does not block a hit from behind a locked facing (block recovery) and does not drain endurance', () => {
+    // An active block auto-faces the attacker, so "from behind" can only happen while facing is
+    // locked: here the block is already in its recovery phase, which no longer blocks anyway,
+    // and more importantly keeps the old facing so the frontal-arc rule is still exercised.
     const state = blockingSetup();
+    state.dummy.currentAction = { type: 'block', phase: 'recovery' };
+    state.dummy.actionTick = 0;
     state.dummy.facing = { x: -state.dummy.facing.x, z: -state.dummy.facing.z };
     const startingEndurance = state.dummy.endurance;
     const startingStamina = state.dummy.stamina;
-    const result = pairStep(state, { blockHeld: true });
+    const result = pairStep(state, {});
     expect(result.events.some((event) => event.type === 'ATTACK_HIT')).toBe(true);
     expect(result.events.some((event) => event.type === 'ATTACK_BLOCKED')).toBe(false);
     expect(result.state.dummy.endurance).toBe(startingEndurance);
     expect(result.state.dummy.stamina).toBe(startingStamina);
+  });
+
+  it('still checks the frontal arc for a facing that cannot track: an idle defender hit mid-turn is not "blocked"', () => {
+    // The frontal-arc check remains the deciding rule for whether a hit is blocked; auto-facing
+    // merely keeps an active guard pointed at the opponent. A defender that is not blocking
+    // takes the hit regardless of facing.
+    const state = readyPlayerAttack(createCombatState());
+    state.dummy.facing = { x: 0, z: 1 };
+    const result = pairStep(state, {});
+    expect(result.events.some((event) => event.type === 'ATTACK_HIT')).toBe(true);
+    expect(result.events.some((event) => event.type === 'ATTACK_BLOCKED')).toBe(false);
   });
 
   it('resumes stamina regeneration immediately after a guard break with the default delay', () => {
@@ -623,6 +639,203 @@ describe('endurance and guard break', () => {
       broken = result.events.some((event) => event.type === 'GUARD_BROKEN');
     }
     expect(broken).toBe(true);
+  });
+});
+
+describe('block facing (phase 1c.2)', () => {
+  it('keeps a blocker facing an attacker circling to the side', () => {
+    let state = createCombatState();
+    state.dummy.stationary = false;
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: 2.5, z: 0 };
+    // The player raises a guard; the dummy circles around at a fixed radius.
+    state = stepCombatantPair(state, { player: neutral({ blockHeld: true }), dummy: neutral() }).state;
+    expect(state.player.currentAction.type).toBe('block');
+    for (let index = 0; index < 90; index += 1) {
+      const toward = {
+        x: state.dummy.position.x - state.player.position.x,
+        z: state.dummy.position.z - state.player.position.z,
+      };
+      const tangent = { x: -toward.z, z: toward.x };
+      const length = Math.hypot(tangent.x, tangent.z);
+      state = stepCombatantPair(state, {
+        player: neutral({ blockHeld: true }),
+        dummy: neutral({ x: tangent.x / length, z: tangent.z / length }),
+      }).state;
+      expect(state.player.currentAction.type).toBe('block');
+      // Facing updates at the start of each tick, so it tracks the attacker's position as it
+      // was when the tick began (`toward`), one tick of circling behind at most.
+      const cross = state.player.facing.x * toward.z - state.player.facing.z * toward.x;
+      const dot = state.player.facing.x * toward.x + state.player.facing.z * toward.z;
+      expect(cross).toBeCloseTo(0, 10);
+      expect(dot).toBeGreaterThan(0);
+    }
+  });
+
+  it('blocks a hit that would have come from behind a locked facing', () => {
+    // Identical to the old from-behind setup: the blocker faces away from the attacker at the
+    // start of the tick. With block facing, the active guard re-faces the attacker and blocks.
+    const state = blockingSetup();
+    state.dummy.facing = { x: -state.dummy.facing.x, z: -state.dummy.facing.z };
+    const result = pairStep(state, { blockHeld: true });
+    expect(result.events.some((event) => event.type === 'ATTACK_BLOCKED')).toBe(true);
+    expect(result.events.some((event) => event.type === 'ATTACK_HIT')).toBe(false);
+    expect(result.state.dummy.health).toBe(result.state.dummy.maxHealth);
+  });
+
+  it('keeps facing locked during attack, dodge, stagger, and block recovery', () => {
+    const cases: Array<{ action: CombatState['player']['currentAction']; input?: Partial<CombatInput> }> = [
+      { action: { type: 'attack', phase: 'startup' } },
+      { action: { type: 'dodge', phase: 'startup' } },
+      { action: { type: 'stagger', phase: 'recovery' } },
+      { action: { type: 'block', phase: 'recovery' } },
+    ];
+    for (const testCase of cases) {
+      const state = createCombatState();
+      state.player.currentAction = { ...testCase.action };
+      state.player.actionTick = 0;
+      if (testCase.action.type === 'dodge') state.player.actionDirection = { x: 1, z: 0 };
+      state.player.facing = { x: 1, z: 0 };
+      // Move the opponent somewhere the locked facing does not point at.
+      state.dummy.position = { x: state.player.position.x - 3, z: state.player.position.z - 3 };
+      const result = stepCombatantPair(state, { player: neutral(testCase.input ?? {}), dummy: neutral() });
+      expect(result.state.player.facing).toEqual({ x: 1, z: 0 });
+    }
+  });
+
+  it('re-faces on every tick of a held block, not only the first', () => {
+    let state = createCombatState();
+    state.dummy.stationary = false;
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: 2, z: 0 };
+    state = stepCombatantPair(state, { player: neutral({ blockHeld: true }), dummy: neutral() }).state;
+    // Teleport the opponent to the opposite side mid-hold; the guard must follow next tick.
+    state.dummy.position = { x: -2, z: 0 };
+    state = stepCombatantPair(state, { player: neutral({ blockHeld: true }), dummy: neutral() }).state;
+    expect(state.player.facing.x).toBeCloseTo(-1, 10);
+    expect(state.player.facing.z).toBeCloseTo(0, 10);
+  });
+});
+
+describe('guard break recovery (phase 1c.2)', () => {
+  it('locks in the phase 1c.2 tuning values', () => {
+    expect(COMBAT_TUNING.attack.minIntervalTicks).toBe(28);
+    expect(COMBAT_TUNING.block.guardBreakStaggerTicks).toBe(40);
+    expect(COMBAT_TUNING.block.guardBreakResetRatio).toBe(0);
+    expect(COMBAT_TUNING.block.guardBreakRegenDelayTicks).toBe(30);
+    expect(COMBAT_TUNING.block.enduranceRegenPerTick).toBeCloseTo(0.3, 10);
+    expect(COMBAT_TUNING.block.enduranceRegenDelayTicks).toBe(45);
+  });
+
+  it('ends the stagger with zero endurance, waits the dedicated delay, then regenerates gradually', () => {
+    const state = brokenBlockSetup();
+    let current = pairStep(state, { blockHeld: true }).state;
+    expect(current.dummy.currentAction.type).toBe('stagger');
+    current.player.currentAction = { type: 'idle', phase: 'idle' };
+    current.player.position = { x: -9, z: -6 };
+
+    // The stagger lasts exactly guardBreakStaggerTicks ticks (the breaking tick included).
+    for (let index = 1; index < COMBAT_TUNING.block.guardBreakStaggerTicks - 1; index += 1) {
+      current = pairStep(current).state;
+      expect(current.dummy.currentAction.type).toBe('stagger');
+      expect(current.dummy.endurance).toBe(0);
+    }
+    current = pairStep(current).state;
+    expect(current.dummy.currentAction.type).toBe('idle');
+    expect(current.dummy.guardBroken).toBe(false);
+    expect(current.dummy.endurance).toBe(0);
+
+    // No regeneration until guardBreakRegenDelayTicks after the stagger ended.
+    for (let index = 1; index < COMBAT_TUNING.block.guardBreakRegenDelayTicks; index += 1) {
+      current = pairStep(current).state;
+      expect(current.dummy.endurance).toBe(0);
+    }
+    current = pairStep(current).state;
+    expect(current.dummy.endurance).toBeCloseTo(COMBAT_TUNING.block.enduranceRegenPerTick, 10);
+    current = pairStep(current).state;
+    expect(current.dummy.endurance).toBeCloseTo(COMBAT_TUNING.block.enduranceRegenPerTick * 2, 10);
+  });
+
+  it('breaks the guard again on a blocked hit at exactly zero endurance', () => {
+    const state = blockingSetup(0);
+    const startingHealth = state.dummy.health;
+    const result = pairStep(state, { blockHeld: true });
+    expect(result.events.some((event) => event.type === 'GUARD_BROKEN')).toBe(true);
+    expect(result.events.some((event) => event.type === 'BLOCK_BROKEN')).toBe(true);
+    expect(result.state.dummy.currentAction.type).toBe('stagger');
+    expect(result.state.dummy.health).toBe(startingHealth - COMBAT_TUNING.attack.damage);
+  });
+
+  it('keeps the ordinary post-block endurance regen delay at enduranceRegenDelayTicks', () => {
+    // An ordinary blocked hit (no break) still waits the normal 45-tick delay, which is
+    // different from the 30-tick post-stagger delay. The earlier "waits the regen delay"
+    // test covers the exact count; this pins the two delays apart so a tuning regression
+    // that merges them is caught.
+    expect(COMBAT_TUNING.block.enduranceRegenDelayTicks).not.toBe(COMBAT_TUNING.block.guardBreakRegenDelayTicks);
+    const state = blockingSetup();
+    const current = pairStep(state, { blockHeld: true }).state;
+    expect(current.dummy.enduranceRegenDelay).toBe(COMBAT_TUNING.block.enduranceRegenDelayTicks - 1);
+  });
+
+  it('recovers both combatants independently when both are guard-broken on the same tick', () => {
+    let state = createCombatState();
+    state.dummy.stationary = false;
+    for (const combatant of [state.player, state.dummy]) {
+      combatant.currentAction = { type: 'stagger', phase: 'recovery' };
+      combatant.actionTick = 0;
+      combatant.guardBroken = true;
+      combatant.endurance = 0;
+    }
+    for (let index = 0; index < COMBAT_TUNING.block.guardBreakStaggerTicks; index += 1) {
+      state = stepCombatantPair(state, { player: neutral(), dummy: neutral() }).state;
+      expect(Number.isFinite(state.player.position.x)).toBe(true);
+      expect(Number.isFinite(state.dummy.position.x)).toBe(true);
+    }
+    expect(state.player.currentAction.type).toBe('idle');
+    expect(state.dummy.currentAction.type).toBe('idle');
+    expect(state.player.guardBroken).toBe(false);
+    expect(state.dummy.guardBroken).toBe(false);
+    expect(state.player.endurance).toBe(0);
+    expect(state.dummy.endurance).toBe(0);
+  });
+
+  it('survives a guard break in a corner without leaving bounds or producing NaN', () => {
+    let state = createCombatState();
+    state.dummy.stationary = false;
+    state.dummy.position = { x: state.bounds.maxX, z: state.bounds.maxZ };
+    state.player.position = { x: state.bounds.maxX - 1.5, z: state.bounds.maxZ };
+    state.dummy.endurance = 1;
+    state.dummy.currentAction = { type: 'block', phase: 'active' };
+    state.dummy.actionTick = COMBAT_TUNING.block.startupTicks;
+    faceDummyTowardPlayer(state);
+    readyPlayerAttack(state);
+    let result = pairStep(state, { blockHeld: true });
+    expect(result.events.some((event) => event.type === 'GUARD_BROKEN')).toBe(true);
+    let current = result.state;
+    for (let index = 0; index < COMBAT_TUNING.block.guardBreakStaggerTicks + 5; index += 1) {
+      current = stepCombatantPair(current, {
+        player: neutral({ x: 1 }),
+        dummy: neutral({ x: 1, z: 1, blockHeld: true }),
+      }).state;
+      expect(Number.isFinite(current.dummy.position.x)).toBe(true);
+      expect(Number.isFinite(current.dummy.position.z)).toBe(true);
+      expect(current.dummy.position.x).toBeLessThanOrEqual(current.bounds.maxX);
+      expect(current.dummy.position.z).toBeLessThanOrEqual(current.bounds.maxZ);
+    }
+  });
+
+  it('ignores a block released or re-pressed during the stagger', () => {
+    const state = brokenBlockSetup();
+    let current = pairStep(state, { blockHeld: true }).state;
+    current.player.currentAction = { type: 'idle', phase: 'idle' };
+    current.player.position = { x: -9, z: -6 };
+    // Release block entirely for a few ticks, then hold it again: the stagger must not care.
+    for (let index = 1; index < COMBAT_TUNING.block.guardBreakStaggerTicks - 1; index += 1) {
+      current = pairStep(current, index < 10 ? {} : { blockHeld: true }).state;
+      expect(current.dummy.currentAction.type).toBe('stagger');
+    }
+    current = pairStep(current).state;
+    expect(current.dummy.currentAction.type).toBe('idle');
   });
 });
 

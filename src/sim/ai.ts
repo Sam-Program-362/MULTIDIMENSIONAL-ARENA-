@@ -2,6 +2,7 @@ import type { Vec2 } from './arena';
 import {
   COMBAT_TUNING,
   NEUTRAL_COMBAT_INPUT,
+  attackProfileOf,
   stepCombatantPair,
   type ActionPhase,
   type ActionType,
@@ -19,7 +20,12 @@ export interface AiProfile {
   aggression: number;
   caution: number;
   mistakeChance: number;
-  preferredRange: number;
+  /**
+   * Edge distance the AI keeps OUTSIDE the target's attack reach. The default fighting
+   * distance is `targetReach + reachMargin`; the AI holds there unless it is entering,
+   * guarding, punishing, or disengaging.
+   */
+  reachMargin: number;
   rangeTolerance: number;
   mistakeRangeMargin: number;
   defenseRangeMargin: number;
@@ -51,6 +57,32 @@ export interface AiProfile {
   dashCloseDistance: number;
   dashCloseChance: number;
   dashMinStaminaRatio: number;
+  /** Engagement cycle: relative weights for choosing the entry plan each cycle. */
+  baitPunishWeight: number;
+  dashStrikeWeight: number;
+  pokeWeight: number;
+  /** Observed target attack-cooldown ticks that count as an opening worth entering on. */
+  minOpeningCooldownTicks: number;
+  /** Entries stop at (own attack range - strikeRangeMargin) instead of running through. */
+  strikeRangeMargin: number;
+  /** Dash-strike only dashes when the fixed dodge distance leaves at least this much room. */
+  dashEntrySlack: number;
+  /** The strike is pressed up to this far outside own range; startup closes the rest. */
+  strikePressMargin: number;
+  /** During an entry, guard when the observed target could swing within this many ticks. */
+  entryShieldThreatTicks: number;
+  /** How long the entry shield is held per raise. */
+  entryShieldHoldTicks: number;
+  /** Chance per decision that the entry shield is actually raised (rookies miss some). */
+  entryShieldChance: number;
+  /** Bait-punish gives up and falls through to another plan after this random wait. */
+  patienceTicksMin: number;
+  patienceTicksMax: number;
+  /** Ticks spent back at the edge after every strike before a new plan starts. */
+  disengageTicksMin: number;
+  disengageTicksMax: number;
+  /** An entry that cannot land a strike within this many ticks is abandoned. */
+  entryTimeoutTicks: number;
 }
 
 export const ROOKIE_PROFILE: Readonly<AiProfile> = {
@@ -59,7 +91,7 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   aggression: 0.58,
   caution: 0.52,
   mistakeChance: 0.14,
-  preferredRange: 1.65,
+  reachMargin: 0.5,
   rangeTolerance: 0.25,
   mistakeRangeMargin: 0.55,
   defenseRangeMargin: 0.45,
@@ -86,6 +118,21 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   dashCloseDistance: 4.5,
   dashCloseChance: 0.45,
   dashMinStaminaRatio: 0.35,
+  baitPunishWeight: 0.35,
+  dashStrikeWeight: 0.25,
+  pokeWeight: 0.4,
+  minOpeningCooldownTicks: 16,
+  strikeRangeMargin: 0.25,
+  dashEntrySlack: 0.6,
+  strikePressMargin: 0.25,
+  entryShieldThreatTicks: 16,
+  entryShieldHoldTicks: 8,
+  entryShieldChance: 0.9,
+  patienceTicksMin: 40,
+  patienceTicksMax: 90,
+  disengageTicksMin: 18,
+  disengageTicksMax: 45,
+  entryTimeoutTicks: 60,
 } as const;
 
 export type StaminaBand = 'low' | 'ok';
@@ -97,6 +144,12 @@ export interface AiTargetSnapshot {
   currentAction: { type: ActionType; phase: ActionPhase };
   actionTick: number;
   staminaBand: StaminaBand;
+  /**
+   * The target's attack cooldown at snapshot time. Public information: the HUD shows the
+   * player exactly the same fill for the opponent. It is read through the same delay as
+   * everything else in the snapshot.
+   */
+  attackCooldownRemaining: number;
   defeated: boolean;
 }
 
@@ -114,12 +167,18 @@ export interface AiMistakeCounts {
   overcommit: number;
 }
 
+export type AiEngagePhase = 'approach' | 'hold' | 'entry' | 'disengage';
+export type AiEntryPlan = 'bait-punish' | 'dash-strike' | 'poke';
+
 export type AiDecisionReason =
   | 'waiting'
   | 'approach'
-  | 'circle'
+  | 'spacing-out'
+  | 'hold-edge'
+  | 'entry'
+  | 'strike'
+  | 'disengage'
   | 'retreat'
-  | 'attack'
   | 'defend-block'
   | 'defend-dodge'
   | 'guard-stance'
@@ -145,6 +204,17 @@ export interface AiState {
   decisionCount: number;
   mistakes: AiMistakeCounts;
   lastDecision: AiDecisionReason;
+  /** Engagement cycle: approach -> hold at the edge -> entry -> strike -> disengage. */
+  engagePhase: AiEngagePhase;
+  entryPlan: AiEntryPlan;
+  /** Bait-punish falls through to another plan when this tick passes without an opening. */
+  patienceDeadlineTick: number;
+  /** An entry that has not struck by this tick is abandoned into a disengage. */
+  entryDeadlineTick: number;
+  /** Disengage lasts at least until this tick before a new plan is chosen. */
+  disengageUntilTick: number;
+  /** True once the dash-strike entry has spent its dodge for the current entry. */
+  entryDashUsed: boolean;
 }
 
 export interface AiDecision {
@@ -163,6 +233,7 @@ const neutralSnapshot = (): AiTargetSnapshot => ({
   currentAction: { type: 'idle', phase: 'idle' },
   actionTick: 0,
   staminaBand: 'ok',
+  attackCooldownRemaining: 0,
   defeated: false,
 });
 
@@ -173,6 +244,7 @@ function targetSnapshot(target: CombatantState): AiTargetSnapshot {
     currentAction: { ...target.currentAction },
     actionTick: target.actionTick,
     staminaBand: target.stamina / target.maxStamina <= COMBAT_TUNING.lowStaminaThreshold ? 'low' : 'ok',
+    attackCooldownRemaining: target.attackCooldownRemaining,
     defeated: target.defeated,
   };
 }
@@ -206,6 +278,12 @@ export function createAiState(
     decisionCount: 0,
     mistakes: { outsideAttack: 0, overblock: 0, overcommit: 0 },
     lastDecision: 'waiting',
+    engagePhase: 'approach',
+    entryPlan: 'poke',
+    patienceDeadlineTick: 0,
+    entryDeadlineTick: 0,
+    disengageUntilTick: 0,
+    entryDashUsed: false,
   };
 }
 
@@ -233,11 +311,13 @@ function delayedHistory(
   return { history, observed: history[0] };
 }
 
+/** Hold a chosen distance: approach when too far, circle when there, back out when too close. */
 function movementAtRange(
   self: CombatantState,
   target: AiTargetSnapshot,
   profile: AiProfile,
   circleDirection: -1 | 1,
+  desiredDistance: number,
 ): Vec2 {
   const toward = normalized({
     x: target.position.x - self.position.x,
@@ -247,7 +327,7 @@ function movementAtRange(
     target.position.x - self.position.x,
     target.position.z - self.position.z,
   );
-  if (distance > profile.preferredRange + profile.rangeTolerance) {
+  if (distance > desiredDistance + profile.rangeTolerance) {
     return { x: toward.x * profile.approachStrength, z: toward.z * profile.approachStrength };
   }
 
@@ -255,7 +335,7 @@ function movementAtRange(
     x: -toward.z * profile.sidestepStrength * circleDirection,
     z: toward.x * profile.sidestepStrength * circleDirection,
   };
-  if (distance < profile.preferredRange - profile.rangeTolerance) {
+  if (distance < desiredDistance - profile.rangeTolerance) {
     return limited({
       x: circle.x - toward.x * profile.spacingStrength,
       z: circle.z - toward.z * profile.spacingStrength,
@@ -278,6 +358,30 @@ function steerInsideBounds(
   return limited(steered);
 }
 
+/**
+ * Steer inside bounds, and if the wanted direction is fully blocked by walls (a corner),
+ * slide along the wall in the current circle direction instead of freezing in place.
+ */
+function steerOrWallSlide(
+  movement: Vec2,
+  self: CombatantState,
+  bounds: CombatState['bounds'],
+  wallBuffer: number,
+  circleDirection: -1 | 1,
+): Vec2 {
+  const steered = steerInsideBounds(movement, self, bounds, wallBuffer);
+  if (lengthOf(steered) > 0.05 || lengthOf(movement) <= 0.05) return steered;
+  const slideCandidates: Vec2[] = [
+    { x: -movement.z * circleDirection, z: movement.x * circleDirection },
+    { x: movement.z * circleDirection, z: -movement.x * circleDirection },
+  ];
+  for (const candidate of slideCandidates) {
+    const slid = steerInsideBounds(normalized(candidate), self, bounds, wallBuffer);
+    if (lengthOf(slid) > 0.05) return slid;
+  }
+  return { x: 0, z: 0 };
+}
+
 function retreatMovement(self: CombatantState, target: AiTargetSnapshot, strength: number): Vec2 {
   const away = normalized({
     x: self.position.x - target.position.x,
@@ -296,9 +400,29 @@ function currentInput(state: AiState, self: CombatantState, tick: number): Comba
   };
 }
 
+const randomInRange = (minimum: number, maximum: number, roll: number): number =>
+  minimum + Math.floor(roll * (Math.max(minimum, maximum) - minimum + 1));
+
+function choosePlan(profile: AiProfile, roll: number, excludeBaitPunish: boolean): AiEntryPlan {
+  const bait = excludeBaitPunish ? 0 : Math.max(0, profile.baitPunishWeight);
+  const dash = Math.max(0, profile.dashStrikeWeight);
+  const poke = Math.max(0, profile.pokeWeight);
+  const total = bait + dash + poke;
+  if (total <= 0) return 'poke';
+  const pick = roll * total;
+  if (pick < bait) return 'bait-punish';
+  if (pick < bait + dash) return 'dash-strike';
+  return 'poke';
+}
+
 /**
  * Deterministic rookie controller. The target's current snapshot is appended to history, but all
  * decisions use the snapshot exactly `reactionTicks` old. No target input is accepted or read.
+ *
+ * Spacing rules: the AI's default fighting distance is `targetReach + reachMargin` (the "edge").
+ * It never idles or circles inside the target's reach while the target's attack is observed as
+ * available; it only goes inside the reach to execute an entry plan, to punish, or behind a
+ * guard, and after every strike it disengages back to the edge.
  */
 export function decide(
   aiState: AiState,
@@ -334,6 +458,9 @@ export function decide(
   const guardHoldRoll = random();
   const punishRoll = random();
   const dashRoll = random();
+  const planRoll = random();
+  const patienceRoll = random();
+  const disengageRoll = random();
 
   let circleDirection = aiState.circleDirection;
   if (circleRoll < profile.circleSwitchChance) circleDirection = circleDirection === 1 ? -1 : 1;
@@ -350,19 +477,67 @@ export function decide(
   if (staminaRatio <= profile.retreatStaminaRatio) retreatUntilTick = tick + profile.retreatTicks;
   const retreating = tick < retreatUntilTick && staminaRatio < profile.retreatResumeStaminaRatio;
 
-  let heldMovement = movementAtRange(self, target, profile, circleDirection);
-  let reason: AiDecisionReason = distance > profile.preferredRange + profile.rangeTolerance
-    ? 'approach'
-    : 'circle';
+  // Reach awareness: the target's attack profile (its loadout) is static public information,
+  // exactly like the weapon a player can see; only time-varying state goes through the delay.
+  const targetReach = attackProfileOf(observation.target).range;
+  const edgeDistance = targetReach + profile.reachMargin;
+  // "Attack available" as seen through the delayed snapshot: cooldown finished, not swinging,
+  // and not holding a guard (a raised block must pass its recovery before it can attack).
+  const observedHoldingBlock = target.currentAction.type === 'block'
+    && target.currentAction.phase !== 'recovery';
+  const observedAttackReady = target.attackCooldownRemaining <= 0
+    && target.currentAction.type !== 'attack'
+    && target.currentAction.type !== 'stagger'
+    && !observedHoldingBlock;
+  // Openings worth entering on, all read from the delayed snapshot: the target is committed
+  // to something (swing recovery, cooldown, stagger, or a raised guard) and cannot hit back.
+  const observedOpening = target.currentAction.type === 'stagger'
+    || (target.currentAction.type === 'attack' && target.currentAction.phase === 'recovery')
+    || (target.currentAction.type === 'dodge' && target.currentAction.phase === 'recovery')
+    || observedHoldingBlock
+    || target.attackCooldownRemaining >= profile.minOpeningCooldownTicks;
+  // The target's next swing cannot start before its cooldown elapses (public information).
+  // A small observed remainder means the swing is imminent; committing an attack into that
+  // gap is how trades happen, so punish and strike both respect it. A staggered target
+  // cannot swing at all, so the veto never applies there.
+  const observedSwingSoon = target.currentAction.type !== 'stagger'
+    && target.attackCooldownRemaining > 0
+    && target.attackCooldownRemaining <= profile.entryShieldThreatTicks;
+
+  // Engagement-cycle state for this decision (written back at the end).
+  let engagePhase = aiState.engagePhase;
+  let entryPlan = aiState.entryPlan;
+  let patienceDeadlineTick = aiState.patienceDeadlineTick;
+  let entryDeadlineTick = aiState.entryDeadlineTick;
+  let disengageUntilTick = aiState.disengageUntilTick;
+  let entryDashUsed = aiState.entryDashUsed;
+  const startDisengage = () => {
+    engagePhase = 'disengage';
+    disengageUntilTick = tick + randomInRange(profile.disengageTicksMin, profile.disengageTicksMax, disengageRoll);
+    entryDashUsed = false;
+  };
+
+  // Default movement follows the current engagement phase until a branch overrides it.
+  let heldMovement: Vec2;
+  let reason: AiDecisionReason;
+  if (engagePhase === 'disengage') {
+    heldMovement = retreatMovement(self, target, profile.retreatStrength);
+    reason = 'disengage';
+  } else if (engagePhase === 'entry') {
+    heldMovement = { x: normalized(towardTarget).x * profile.approachStrength, z: normalized(towardTarget).z * profile.approachStrength };
+    reason = 'entry';
+  } else {
+    heldMovement = movementAtRange(self, target, profile, circleDirection, edgeDistance);
+    reason = distance > edgeDistance + profile.rangeTolerance ? 'approach' : 'hold-edge';
+  }
   if (retreating) {
     heldMovement = retreatMovement(self, target, profile.retreatStrength);
     reason = 'retreat';
   }
-  heldMovement = steerInsideBounds(heldMovement, self, observation.bounds, profile.wallBuffer);
 
   let blockUntilTick = aiState.blockUntilTick;
   let guardReadyTick = aiState.guardReadyTick;
-  const threatRange = COMBAT_TUNING.attack.range + profile.defenseRangeMargin;
+  const threatRange = attackProfileOf(observation.target).range + profile.defenseRangeMargin;
   // A guard held while the target keeps being observed far away is dropped after a few looks.
   let farObservations = distance > threatRange ? aiState.farObservations + 1 : 0;
   if (tick < blockUntilTick && farObservations >= profile.guardReleaseObservations) {
@@ -376,10 +551,11 @@ export function decide(
     blockHeld: tick < blockUntilTick && self.stamina >= COMBAT_TUNING.block.minimumStartStamina,
   };
   const mistakes = { ...aiState.mistakes };
-  const attackProfile = COMBAT_TUNING.attack;
+  const attackProfile = attackProfileOf(self);
   const enoughToAttack = self.stamina >= attackProfile.staminaCost;
   const enoughToDodge = self.stamina >= COMBAT_TUNING.dodge.staminaCost;
   const idle = self.currentAction.type === 'idle';
+  // Attack presses respect the shared cooldown: pressed only when it has fully elapsed.
   const canAttackNow = idle && enoughToAttack && self.attackCooldownRemaining <= 0;
   const observedStartup = target.currentAction.type === 'attack'
     && target.currentAction.phase === 'startup';
@@ -392,11 +568,13 @@ export function decide(
   const dashLeavesEnoughStamina = self.maxStamina > 0
     && (self.stamina - COMBAT_TUNING.dodge.staminaCost) / self.maxStamina >= profile.dashMinStaminaRatio;
   const staminaRatioOkForDash = staminaRatio >= profile.dashMinStaminaRatio;
+  const canDashEntry = enoughToDodge && staminaRatioOkForDash && dashLeavesEnoughStamina;
 
-  if (!retreating && canAttackNow && observedPunishable && distance <= attackProfile.range
-    && punishRoll < profile.punishChance) {
+  if (!retreating && canAttackNow && observedPunishable && !observedSwingSoon
+    && distance <= attackProfile.range && punishRoll < profile.punishChance) {
     input.attackPressed = true;
     reason = 'punish';
+    startDisengage();
   } else if (!retreating && idle && observedStartup && defensiveRange && cautionRoll < profile.caution) {
     if (defenseRoll < profile.dodgeShare && enoughToDodge) {
       const away = retreatMovement(self, target, profile.retreatStrength);
@@ -449,35 +627,164 @@ export function decide(
     input.dodgePressed = true;
     heldMovement = steerInsideBounds(toward, self, observation.bounds, profile.wallBuffer);
     reason = 'dash-close';
-  } else if (!retreating && idle && enoughToAttack) {
-    if (distance <= attackProfile.range && aggressionRoll < profile.aggression) {
-      input.attackPressed = true;
-      reason = 'attack';
-    } else if (
-      distance > attackProfile.range
-      && distance <= attackProfile.range + profile.mistakeRangeMargin
-      && mistakeRoll < profile.mistakeChance
-    ) {
-      input.attackPressed = true;
-      mistakes.outsideAttack += 1;
-      reason = 'mistake-outside-attack';
-    }
+    engagePhase = 'approach';
   } else if (
     !retreating
     && self.currentAction.type === 'attack'
     && self.currentAction.phase === 'recovery'
     && enoughToAttack
+    // A press this late is an ordinary buffered press: it can only fire after the cooldown.
+    && self.attackCooldownRemaining <= COMBAT_TUNING.inputBufferTicks
     && attackProfile.startupTicks
       + attackProfile.activeTicks
       + attackProfile.recoveryTicks
       - self.actionTick <= profile.overcommitWindowTicks
     && mistakeRoll < profile.mistakeChance
   ) {
-    // This is still only an ordinary buffered press; combat decides whether/when it can start.
+    // "Stayed too long": instead of disengaging after the strike, it swings again in place.
     input.attackPressed = true;
     mistakes.overcommit += 1;
     reason = 'mistake-overcommit';
+  } else if (
+    // "Entered early": an eager swing from just outside its own reach.
+    !retreating
+    && canAttackNow
+    && distance > attackProfile.range
+    && distance <= attackProfile.range + profile.mistakeRangeMargin
+    && mistakeRoll < profile.mistakeChance
+  ) {
+    input.attackPressed = true;
+    mistakes.outsideAttack += 1;
+    reason = 'mistake-outside-attack';
+    startDisengage();
+  } else if (!retreating) {
+    // Engagement cycle: approach -> hold at the edge -> entry -> strike -> disengage.
+    if (engagePhase === 'disengage') {
+      if (tick >= disengageUntilTick && distance >= edgeDistance - profile.rangeTolerance) {
+        engagePhase = 'approach';
+      } else {
+        heldMovement = retreatMovement(self, target, profile.retreatStrength);
+        reason = 'disengage';
+        // Cover the backout: if the target's swing is imminent while still inside its
+        // reach, dodge out behind i-frames when stamina allows, otherwise retreat behind
+        // a short guard instead of eating the hit in the back.
+        if (
+          idle
+          && observedSwingSoon
+          && distance <= targetReach + profile.rangeTolerance
+          && defenseRoll < profile.entryShieldChance
+        ) {
+          if (enoughToDodge && staminaRatioOkForDash && dashLeavesEnoughStamina) {
+            const away = retreatMovement(self, target, 1);
+            input.x = away.x;
+            input.z = away.z;
+            input.dodgePressed = true;
+          } else if (
+            tick >= blockUntilTick
+            && enduranceRatio >= profile.minEnduranceRatioToGuard
+            && self.stamina >= COMBAT_TUNING.block.minimumStartStamina
+          ) {
+            blockUntilTick = tick + profile.entryShieldHoldTicks;
+            input.blockHeld = true;
+          }
+        }
+      }
+    }
+    if (engagePhase === 'approach') {
+      if (distance > edgeDistance + profile.rangeTolerance) {
+        heldMovement = movementAtRange(self, target, profile, circleDirection, edgeDistance);
+        reason = 'approach';
+      } else if (distance < edgeDistance - profile.rangeTolerance && observedAttackReady) {
+        // Inside the target's reach with its attack up: never linger here, get back out
+        // at full retreat speed rather than the gentle spacing shuffle.
+        heldMovement = retreatMovement(self, target, profile.retreatStrength);
+        reason = 'spacing-out';
+      } else {
+        engagePhase = 'hold';
+        entryPlan = choosePlan(profile, planRoll, false);
+        patienceDeadlineTick = tick
+          + randomInRange(profile.patienceTicksMin, profile.patienceTicksMax, patienceRoll);
+      }
+    }
+    if (engagePhase === 'hold') {
+      const baitTimedOut = entryPlan === 'bait-punish' && tick >= patienceDeadlineTick;
+      if (baitTimedOut) {
+        // A passive target never shows an opening: fall through to a committal plan.
+        entryPlan = choosePlan(profile, planRoll, true);
+      }
+      if (entryPlan !== 'bait-punish' || observedOpening || baitTimedOut) {
+        engagePhase = 'entry';
+        entryDeadlineTick = tick + profile.entryTimeoutTicks;
+        entryDashUsed = false;
+      } else {
+        heldMovement = movementAtRange(self, target, profile, circleDirection, edgeDistance);
+        reason = 'hold-edge';
+      }
+    }
+    if (engagePhase === 'entry') {
+      if (tick >= entryDeadlineTick) {
+        startDisengage();
+        heldMovement = retreatMovement(self, target, profile.retreatStrength);
+        reason = 'disengage';
+      } else {
+        let dashedThisDecision = false;
+        if (entryPlan === 'dash-strike' && !entryDashUsed && idle) {
+          // Only dash when the fixed dodge distance will not overshoot deep past the target.
+          if (canDashEntry && distance >= COMBAT_TUNING.dodge.distance + profile.dashEntrySlack) {
+            // Enter behind the dodge's i-frames; the strike follows when recovery ends.
+            const toward = normalized(towardTarget);
+            input.x = toward.x;
+            input.z = toward.z;
+            input.dodgePressed = true;
+            entryDashUsed = true;
+            dashedThisDecision = true;
+          } else {
+            entryPlan = 'poke';
+          }
+        }
+        // Step in only as far as the strike needs: never run through the target. While the
+        // target's swing is imminent, wait at the door (just outside its reach) instead of
+        // walking into the active frames; advance once the swing has spent itself.
+        const strikeDistance = observedSwingSoon && distance > targetReach - profile.rangeTolerance
+          ? Math.max(targetReach + profile.rangeTolerance, attackProfile.range - profile.strikeRangeMargin)
+          : Math.max(0.1, attackProfile.range - profile.strikeRangeMargin);
+        heldMovement = movementAtRange(self, target, profile, circleDirection, strikeDistance);
+        reason = 'entry';
+        // Bait-punish and dash-strike entries are committed; a poke still hesitates with
+        // (1 - aggression) probability per decision, like the rookie it is.
+        const committed = entryPlan !== 'poke' || aggressionRoll < profile.aggression;
+        const canStrikeNow = !dashedThisDecision
+          && committed
+          && canAttackNow
+          && distance <= attackProfile.range + profile.strikePressMargin;
+        // Shield advance: the target's swing is imminent, so raise a short guard and let the
+        // swing spend itself on endurance, then strike. An observed startup is NOT used
+        // here: through the reaction delay it is always stale against quick attacks.
+        if (
+          !dashedThisDecision
+          && observedSwingSoon
+          && distance <= targetReach + profile.rangeTolerance
+          && tick >= blockUntilTick
+          && enduranceRatio >= profile.minEnduranceRatioToGuard
+          && self.stamina >= COMBAT_TUNING.block.minimumStartStamina
+          && defenseRoll < profile.entryShieldChance
+        ) {
+          blockUntilTick = tick + profile.entryShieldHoldTicks;
+          input.blockHeld = true;
+        } else if (canStrikeNow && !observedSwingSoon) {
+          input.attackPressed = true;
+          reason = 'strike';
+          startDisengage();
+        }
+      }
+    }
   }
+
+  // Wall awareness applies to every chosen movement; a cornered AI slides along the wall
+  // instead of freezing (and its guard/dodge branches above remain available).
+  heldMovement = steerOrWallSlide(heldMovement, self, observation.bounds, profile.wallBuffer, circleDirection);
+  input.x = input.dodgePressed ? input.x : heldMovement.x;
+  input.z = input.dodgePressed ? input.z : heldMovement.z;
 
   const nextAiState: AiState = {
     ...baseState,
@@ -492,6 +799,12 @@ export function decide(
     decisionCount: aiState.decisionCount + 1,
     mistakes,
     lastDecision: reason,
+    engagePhase,
+    entryPlan,
+    patienceDeadlineTick,
+    entryDeadlineTick,
+    disengageUntilTick,
+    entryDashUsed,
   };
   return { input, nextAiState };
 }

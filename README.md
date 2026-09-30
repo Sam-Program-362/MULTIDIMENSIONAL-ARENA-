@@ -38,7 +38,7 @@ npm run build  # type-check and create dist/
 - `tests/` simulation, input, storage, and DOM-boundary tests
 - `docs/decisions/` accepted architecture and simulation decisions
 
-Blocking a frontal hit costs **endurance**, not health and not stamina; when endurance hits zero the guard breaks and the defender is staggered for 30 ticks at full damage. Attacks obey a per-attack minimum interval (34 ticks for the basic attack profile), shown as a fill on the Attack button. See `docs/decisions/006-endurance-and-attack-interval.md`.
+Blocking a frontal hit costs **endurance**, not health and not stamina; an active block auto-faces the opponent so it cannot be circled. When endurance hits zero the guard breaks: the defender is staggered for 40 ticks at full damage, its endurance is empty when the stagger ends, and regeneration only resumes 30 ticks later — blocking on an empty bar breaks again. Attacks obey a per-attack minimum interval (28 ticks for the basic attack profile), shown as a fill on the Attack button. The Rookie opponent fights at the edge of the player's reach with an approach → hold → entry → strike → disengage cycle, using only public, reaction-delayed information. See `docs/decisions/006-endurance-and-attack-interval.md` and `docs/decisions/007-block-facing-guard-recovery-and-ai-spacing.md`.
 
 Heavy attacks, a weapon/equipment system, parry or perfect block, and adaptive AI are **planned only**.
 

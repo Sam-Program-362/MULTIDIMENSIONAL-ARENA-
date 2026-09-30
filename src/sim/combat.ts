@@ -30,7 +30,7 @@ const BASIC_ATTACK_PROFILE: AttackProfile = {
   arcDegrees: 100,
   damage: 18,
   staminaCost: 5,
-  minIntervalTicks: 34,
+  minIntervalTicks: 28,
   lowStaminaDamageMultiplier: 0.9,
   startupMovementMultiplier: 0.75,
   activeMovementMultiplier: 0.6,
@@ -61,11 +61,17 @@ export const COMBAT_TUNING = {
     blockChipFraction: 0,
     /** Endurance removed per point of blocked damage. */
     enduranceDrainPerDamage: 1,
-    enduranceRegenPerTick: 0.25,
+    enduranceRegenPerTick: 0.3,
     /** Ticks without a blocked hit before endurance starts recovering. */
     enduranceRegenDelayTicks: 45,
-    guardBreakStaggerTicks: 30,
-    guardBreakResetRatio: 0.5,
+    guardBreakStaggerTicks: 40,
+    /** Endurance is restored to this fraction of max when the stagger ends (0 = empty). */
+    guardBreakResetRatio: 0,
+    /**
+     * Ticks AFTER the guard-break stagger ends before endurance regeneration resumes. It applies
+     * only to guard breaks; ordinary blocked hits keep using `enduranceRegenDelayTicks`.
+     */
+    guardBreakRegenDelayTicks: 30,
   },
   dodge: {
     startupTicks: 1,
@@ -350,6 +356,18 @@ function faceOpponent(actor: CombatantState, opponent: CombatantState): void {
   actor.facing = normalize(vectorTo(actor, opponent), actor.facing);
 }
 
+/**
+ * Facing auto-tracks the opponent while idle AND while a block is held (startup/active phase).
+ * A guard therefore cannot be circled around; the frontal-arc check still decides whether an
+ * individual hit is blocked. Facing stays locked during attack, dodge, stagger, and the block
+ * recovery phase.
+ */
+function tracksOpponentFacing(actor: CombatantState): boolean {
+  const { type, phase } = actor.currentAction;
+  if (type === 'idle') return true;
+  return type === 'block' && (phase === 'startup' || phase === 'active');
+}
+
 function isInsideFacingArc(facing: Vec2, toward: Vec2, arcDegrees: number): boolean {
   const direction = normalize(toward);
   if (direction.x === 0 && direction.z === 0) return true;
@@ -515,7 +533,10 @@ function moveCombatant(actor: CombatantState, input: CombatInput, bounds: Combat
 
 /**
  * Guard break: endurance hit zero. The defender staggers, cannot act, and takes full damage
- * from everything until the stagger ends; endurance is restored to a fraction of max then.
+ * from everything until the stagger ends. The stagger leaves endurance at
+ * `guardBreakResetRatio` of max (0 by default) and regeneration only resumes
+ * `guardBreakRegenDelayTicks` after the stagger ends, so blocking again immediately fails:
+ * a blocked hit at zero endurance is another guard break.
  */
 function breakGuard(
   target: CombatantState,
@@ -635,9 +656,11 @@ function finishOrAdvanceAction(actor: CombatantState): void {
     : actor.actionTick >= actionTotalTicks(type, actor);
   if (finished) {
     if (type === 'stagger' && actor.guardBroken) {
-      // Endurance comes back at a fraction of max once the stagger is over.
+      // The stagger ends with endurance at the reset ratio (0 by default: an empty guard), and
+      // regeneration stays paused for the dedicated post-guard-break delay before it resumes.
       actor.guardBroken = false;
       actor.endurance = actor.maxEndurance * COMBAT_TUNING.block.guardBreakResetRatio;
+      actor.enduranceRegenDelay = COMBAT_TUNING.block.guardBreakRegenDelayTicks;
     }
     actor.currentAction = { type: 'idle', phase: 'idle' };
     actor.actionTick = 0;
@@ -678,9 +701,9 @@ function regenerateStamina(actor: CombatantState, actionThisTick: CurrentAction)
 }
 
 /**
- * Endurance recovers only after `enduranceRegenDelayTicks` ticks without a blocked hit. It does
- * not care whether block is held; it is paused only while the guard-break stagger runs, because
- * the stagger restores endurance to a fixed ratio when it ends.
+ * Endurance recovers only after a delay without a blocked hit (`enduranceRegenDelayTicks` after
+ * an ordinary blocked hit, `guardBreakRegenDelayTicks` counted from the end of a guard-break
+ * stagger). It does not care whether block is held; it is paused while the stagger itself runs.
  */
 function regenerateEndurance(actor: CombatantState): void {
   if (actor.defeated || actor.guardBroken) return;
@@ -728,7 +751,7 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
   ];
 
   for (const { actor, input } of pairs) bufferInput(actor, input);
-  for (const { actor, opponent } of pairs) if (actor.currentAction.type === 'idle') faceOpponent(actor, opponent);
+  for (const { actor, opponent } of pairs) if (tracksOpponentFacing(actor)) faceOpponent(actor, opponent);
   for (const { actor, opponent, input } of pairs) startBufferedAction(actor, opponent, input, events, next.tick);
   for (const { actor, input } of pairs) prepareAction(actor, input);
   for (const { actor, input } of pairs) moveCombatant(actor, input, next.bounds);

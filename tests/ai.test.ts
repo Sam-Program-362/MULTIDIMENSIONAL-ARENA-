@@ -541,6 +541,240 @@ describe('rookie AI guard stance, punishing, and dash usage', () => {
     expect(result.nextAiState.lastDecision).not.toBe('dash-close');
   });
 
+  it('never presses Attack while its own cooldown blocks the press beyond the buffer window', () => {
+    let state = createOpponentCombatState();
+    state.player.health = 1e6;
+    state.dummy.health = 1e6;
+    let aiState = createAiState(33, state.player);
+    let presses = 0;
+    for (let tick = 0; tick < 1500; tick += 1) {
+      const cooldownBefore = state.dummy.attackCooldownRemaining;
+      const result = stepCombatWithAi(state, neutral(), aiState);
+      if (result.aiInput.attackPressed) {
+        presses += 1;
+        // A press this close to the end of the cooldown is an ordinary buffered press; it can
+        // never start an attack before the shared interval allows it.
+        expect(cooldownBefore).toBeLessThanOrEqual(COMBAT_TUNING.inputBufferTicks);
+      }
+      state = result.state;
+      aiState = result.aiState;
+    }
+    expect(presses).toBeGreaterThan(0);
+  });
+});
+
+describe('rookie AI spacing and engagement cycle (phase 1c.2)', () => {
+  function standoff(distance: number): CombatState {
+    const state = createOpponentCombatState();
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: distance, z: 0 };
+    face(state.dummy, state.player);
+    face(state.player, state.dummy);
+    return state;
+  }
+
+  const playerReach = COMBAT_TUNING.attack.range;
+  const edgeDistance = playerReach + ROOKIE_PROFILE.reachMargin;
+
+  /** Force the engagement cycle into a specific spot; everything is plain data. */
+  function forceEngagement(
+    aiState: AiState,
+    overrides: Partial<Pick<AiState,
+      'engagePhase' | 'entryPlan' | 'patienceDeadlineTick' | 'entryDeadlineTick' | 'disengageUntilTick'>>,
+  ): AiState {
+    return { ...aiState, patienceDeadlineTick: 1e9, entryDeadlineTick: 1e9, ...overrides };
+  }
+
+  it('stores the target attack cooldown in the snapshot and observes it only after the reaction delay', () => {
+    const cycleProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 0,
+    });
+    const state = standoff(edgeDistance);
+    let aiState = forceEngagement(
+      createAiState(9, state.player, cycleProfile),
+      { engagePhase: 'hold', entryPlan: 'bait-punish' },
+    );
+    // The cooldown starts only now; the AI must not see it before the reaction delay.
+    state.player.attackCooldownRemaining = ROOKIE_PROFILE.minOpeningCooldownTicks + 4;
+    let firstEntryTick: number | null = null;
+    for (let tick = 0; tick <= cycleProfile.reactionTicks; tick += 1) {
+      const result = decide(aiState, aiObservation(state, state.dummy, state.player), tick, cycleProfile);
+      aiState = result.nextAiState;
+      if (aiState.engagePhase === 'entry' && firstEntryTick === null) firstEntryTick = tick;
+    }
+    expect(aiState.history[aiState.history.length - 1]!.attackCooldownRemaining)
+      .toBe(ROOKIE_PROFILE.minOpeningCooldownTicks + 4);
+    expect(firstEntryTick).toBe(cycleProfile.reactionTicks);
+  });
+
+  it('holds the edge outside the target reach while the target attack is available', () => {
+    let state = createOpponentCombatState();
+    state.player.health = 1e6;
+    state.dummy.health = 1e6;
+    let aiState = createAiState(41, state.player);
+    let heldTicksOutsideReach = 0;
+    for (let tick = 0; tick < 1200; tick += 1) {
+      const result = stepCombatWithAi(state, neutral(), aiState);
+      state = result.state;
+      aiState = result.aiState;
+      const distance = Math.hypot(
+        state.player.position.x - state.dummy.position.x,
+        state.player.position.z - state.dummy.position.z,
+      );
+      if (tick > 60 && distance < playerReach - 0.05) {
+        // Inside the target's reach the AI is only ever entering, leaving, or guarding.
+        const excused = aiState.engagePhase === 'entry'
+          || aiState.engagePhase === 'disengage'
+          || result.aiInput.blockHeld
+          || result.aiInput.dodgePressed;
+        expect(excused).toBe(true);
+      }
+      if (aiState.lastDecision === 'hold-edge') {
+        expect(distance).toBeGreaterThan(playerReach);
+        heldTicksOutsideReach += 1;
+      }
+    }
+    expect(heldTicksOutsideReach).toBeGreaterThan(0);
+  });
+
+  it('enters from hold when the delayed observation shows a stagger opening', () => {
+    const cycleProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 0,
+    });
+    const opened = standoff(edgeDistance);
+    opened.player.currentAction = { type: 'stagger', phase: 'recovery' };
+    const openedAi = forceEngagement(
+      createAiState(5, opened.player, cycleProfile),
+      { engagePhase: 'hold', entryPlan: 'bait-punish' },
+    );
+    const entered = decide(openedAi, aiObservation(opened, opened.dummy, opened.player), 0, cycleProfile);
+    expect(entered.nextAiState.engagePhase).toBe('entry');
+
+    const closed = standoff(edgeDistance);
+    const closedAi = forceEngagement(
+      createAiState(5, closed.player, cycleProfile),
+      { engagePhase: 'hold', entryPlan: 'bait-punish' },
+    );
+    const held = decide(closedAi, aiObservation(closed, closed.dummy, closed.player), 0, cycleProfile);
+    expect(held.nextAiState.engagePhase).toBe('hold');
+    expect(held.nextAiState.lastDecision).toBe('hold-edge');
+  });
+
+  it('falls through to a committal plan when bait-punish patience runs out against a passive target', () => {
+    const cycleProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 0,
+    });
+    const state = standoff(edgeDistance);
+    const aiState = forceEngagement(
+      createAiState(7, state.player, cycleProfile),
+      { engagePhase: 'hold', entryPlan: 'bait-punish', patienceDeadlineTick: 0 },
+    );
+    const result = decide(aiState, aiObservation(state, state.dummy, state.player), 5, cycleProfile);
+    expect(result.nextAiState.engagePhase).toBe('entry');
+    expect(result.nextAiState.entryPlan).not.toBe('bait-punish');
+  });
+
+  it('always disengages after a strike and after a punish', () => {
+    const strikeProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 1,
+    });
+    const state = standoff(COMBAT_TUNING.attack.range - 0.1);
+    const aiState = forceEngagement(
+      createAiState(3, state.player, strikeProfile),
+      { engagePhase: 'entry', entryPlan: 'poke' },
+    );
+    const result = decide(aiState, aiObservation(state, state.dummy, state.player), 10, strikeProfile);
+    expect(result.input.attackPressed).toBe(true);
+    expect(result.nextAiState.lastDecision).toBe('strike');
+    expect(result.nextAiState.engagePhase).toBe('disengage');
+    expect(result.nextAiState.disengageUntilTick).toBeGreaterThanOrEqual(10 + strikeProfile.disengageTicksMin);
+    expect(result.nextAiState.disengageUntilTick).toBeLessThanOrEqual(10 + strikeProfile.disengageTicksMax);
+
+    const punishState = standoff(COMBAT_TUNING.attack.range - 0.1);
+    punishState.player.currentAction = { type: 'stagger', phase: 'recovery' };
+    const punishAi = createAiState(4, punishState.player, profile({ punishChance: 1, guardChance: 0 }));
+    const punished = decide(
+      punishAi,
+      aiObservation(punishState, punishState.dummy, punishState.player),
+      0,
+      profile({ punishChance: 1, guardChance: 0 }),
+    );
+    expect(punished.input.attackPressed).toBe(true);
+    expect(punished.nextAiState.lastDecision).toBe('punish');
+    expect(punished.nextAiState.engagePhase).toBe('disengage');
+  });
+
+  it('does not press the strike into an observed imminent swing: it shields instead', () => {
+    const shieldProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 1,
+      entryShieldChance: 1,
+    });
+    const state = standoff(COMBAT_TUNING.attack.range - 0.1);
+    // Observed cooldown in the "swing imminent" window (seeded into history at creation).
+    state.player.attackCooldownRemaining = ROOKIE_PROFILE.entryShieldThreatTicks - 2;
+    const aiState = forceEngagement(
+      createAiState(6, state.player, shieldProfile),
+      { engagePhase: 'entry', entryPlan: 'poke' },
+    );
+    const result = decide(aiState, aiObservation(state, state.dummy, state.player), 0, shieldProfile);
+    expect(result.input.attackPressed).toBe(false);
+    expect(result.input.blockHeld).toBe(true);
+  });
+
+  it('dash-strike honors the dash stamina floor and falls back to a poke', () => {
+    const dashProfile = profile({
+      decisionIntervalTicks: 1, guardChance: 0, mistakeChance: 0, caution: 0, aggression: 1,
+      dashCloseChance: 0,
+    });
+    const fresh = standoff(COMBAT_TUNING.dodge.distance + ROOKIE_PROFILE.dashEntrySlack + 0.2);
+    const freshAi = forceEngagement(
+      createAiState(8, fresh.player, dashProfile),
+      { engagePhase: 'entry', entryPlan: 'dash-strike' },
+    );
+    const dashed = decide(freshAi, aiObservation(fresh, fresh.dummy, fresh.player), 0, dashProfile);
+    expect(dashed.input.dodgePressed).toBe(true);
+    expect(dashed.input.x).toBeLessThan(0);
+    expect(dashed.nextAiState.entryDashUsed).toBe(true);
+
+    const tired = standoff(COMBAT_TUNING.dodge.distance + ROOKIE_PROFILE.dashEntrySlack + 0.2);
+    tired.dummy.stamina = tired.dummy.maxStamina * dashProfile.dashMinStaminaRatio
+      + COMBAT_TUNING.dodge.staminaCost - 0.01;
+    const tiredAi = forceEngagement(
+      createAiState(8, tired.player, dashProfile),
+      { engagePhase: 'entry', entryPlan: 'dash-strike' },
+    );
+    const walked = decide(tiredAi, aiObservation(tired, tired.dummy, tired.player), 0, dashProfile);
+    expect(walked.input.dodgePressed).toBe(false);
+    expect(walked.nextAiState.entryPlan).toBe('poke');
+  });
+
+  it('slides along the wall instead of freezing when cornered while disengaging', () => {
+    let state = createOpponentCombatState();
+    state.dummy.position = { x: state.bounds.maxX - 0.1, z: state.bounds.maxZ - 0.1 };
+    state.player.position = { x: state.bounds.maxX - 2, z: state.bounds.maxZ - 2 };
+    let aiState = forceEngagement(
+      createAiState(12, state.player),
+      { engagePhase: 'disengage', disengageUntilTick: 1e9 },
+    );
+    const start = { ...state.dummy.position };
+    let travelled = 0;
+    let previous = { ...state.dummy.position };
+    for (let tick = 0; tick < 60; tick += 1) {
+      const result = stepCombatWithAi(state, neutral(), aiState);
+      state = result.state;
+      aiState = result.aiState;
+      expect(Number.isFinite(state.dummy.position.x)).toBe(true);
+      expect(Number.isFinite(state.dummy.position.z)).toBe(true);
+      expect(state.dummy.position.x).toBeLessThanOrEqual(state.bounds.maxX);
+      expect(state.dummy.position.z).toBeLessThanOrEqual(state.bounds.maxZ);
+      travelled += Math.hypot(state.dummy.position.x - previous.x, state.dummy.position.z - previous.z);
+      previous = { ...state.dummy.position };
+    }
+    // Cornered but not frozen: it moved along the walls.
+    expect(travelled).toBeGreaterThan(0.5);
+    expect(Math.hypot(state.dummy.position.x - start.x, state.dummy.position.z - start.z)).toBeGreaterThan(0.1);
+  });
+
   it('obeys the shared attack interval over a long fight', () => {
     const interval = COMBAT_TUNING.attack.minIntervalTicks;
     let state = createOpponentCombatState();
