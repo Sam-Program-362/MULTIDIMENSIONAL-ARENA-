@@ -76,6 +76,8 @@ export const COMBAT_TUNING = {
 export const COMBAT_FIXED_DT = 1 / COMBAT_TUNING.tickRate;
 
 export type CombatantId = 'player' | 'dummy';
+/** `draw` is possible when both already-committed attacks defeat their targets on one tick. */
+export type FightWinner = CombatantId | 'draw' | null;
 export type ActionType = 'idle' | 'attack' | 'block' | 'dodge' | 'stagger';
 export type ActionPhase = 'idle' | 'startup' | 'active' | 'recovery';
 
@@ -118,9 +120,11 @@ export interface CombatantState {
 export interface CombatState {
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   player: CombatantState;
+  /** The shared second-combatant slot: stationary in dummy mode, mobile in opponent mode. */
   dummy: CombatantState;
   tick: number;
   fightOver: boolean;
+  winner: FightWinner;
 }
 
 export type CombatEventType =
@@ -232,7 +236,19 @@ export function createCombatState(hiddenStats: HiddenStats = baselineStats()): C
     ),
     tick: 0,
     fightOver: false,
+    winner: null,
   };
+}
+
+/**
+ * Create the active-opponent variant without changing the established dummy-mode factory.
+ * The second combatant keeps the dummy's start position and neutral-stat derived vitals, but is
+ * mobile and therefore obeys the same movement/action rules as the player once given input.
+ */
+export function createOpponentCombatState(hiddenStats: HiddenStats = baselineStats()): CombatState {
+  const state = createCombatState(hiddenStats);
+  state.dummy.stationary = false;
+  return state;
 }
 
 function cloneCombatant(source: CombatantState): CombatantState {
@@ -425,12 +441,21 @@ function applyDamage(attacker: CombatantState, target: CombatantState, amount: n
   events.push({ type: 'DAMAGE_APPLIED', tick, actorId: attacker.id, targetId: target.id, amount, remaining: target.health });
   if (target.health === 0 && !target.defeated) {
     target.defeated = true;
-    target.currentAction = { type: 'idle', phase: 'idle' };
-    target.actionTick = 0;
-    target.invulnerable = false;
-    target.velocity = { x: 0, z: 0 };
+    // Action cleanup is deferred until both already-committed attacks resolve. That makes a
+    // same-tick double knockout an explicit draw instead of an artifact of iteration order.
     events.push({ type: 'COMBATANT_DEFEATED', tick, actorId: attacker.id, targetId: target.id, remaining: 0 });
   }
+}
+
+function finalizeDefeat(actor: CombatantState): void {
+  if (!actor.defeated) return;
+  actor.currentAction = { type: 'idle', phase: 'idle' };
+  actor.actionTick = 0;
+  actor.invulnerable = false;
+  actor.attackConnected = false;
+  actor.actionDirection = { x: 0, z: 0 };
+  actor.velocity = { x: 0, z: 0 };
+  actor.inputBuffer = { attackTicks: 0, dodgeTicks: 0 };
 }
 
 function resolveAttack(attacker: CombatantState, target: CombatantState, events: CombatEvent[], tick: number): void {
@@ -558,11 +583,23 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
   for (const { actor, input } of pairs) prepareAction(actor, input);
   for (const { actor, input } of pairs) moveCombatant(actor, input, next.bounds);
 
-  // Stable player-then-dummy resolution is deliberate and deterministic.
+  // Stable ordering keeps the event log deterministic. Defeat cleanup is deferred, so an attack
+  // already active at the start of this resolution can still produce a same-tick double knockout.
   resolveAttack(next.player, next.dummy, events, next.tick);
-  if (!next.dummy.defeated) resolveAttack(next.dummy, next.player, events, next.tick);
+  resolveAttack(next.dummy, next.player, events, next.tick);
 
   next.fightOver = next.player.defeated || next.dummy.defeated;
+  next.winner = next.player.defeated && next.dummy.defeated
+    ? 'draw'
+    : next.player.defeated
+      ? 'dummy'
+      : next.dummy.defeated
+        ? 'player'
+        : null;
+  if (next.fightOver) {
+    finalizeDefeat(next.player);
+    finalizeDefeat(next.dummy);
+  }
   for (const { actor } of pairs) {
     if (actor.currentAction.type === 'block' && actor.currentAction.phase === 'active' && actor.stamina <= 0) {
       actor.currentAction.phase = 'recovery';
