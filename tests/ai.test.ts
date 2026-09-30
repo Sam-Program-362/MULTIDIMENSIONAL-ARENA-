@@ -3,6 +3,7 @@ import {
   COMBAT_TUNING,
   NEUTRAL_COMBAT_INPUT,
   ROOKIE_PROFILE,
+  VETERAN_PROFILE,
   createAiState,
   createCombatState,
   createOpponentCombatState,
@@ -656,5 +657,149 @@ describe('rookie AI exposure hooks (Phase 1c.3)', () => {
       if (result.input.attackPressed && firstPunishTick === null) firstPunishTick = tick;
     }
     expect(firstPunishTick).toBe(punishProfile.reactionTicks);
+  });
+});
+
+describe('Veteran delayed patterns', () => {
+  it('never enters kill instinct before reactionTicks reveal the target health', () => {
+    const state = createOpponentCombatState();
+    const aiState = createAiState(41, state.player, VETERAN_PROFILE);
+    state.player.health = state.player.maxHealth * 0.3;
+    let current = aiState;
+    for (let tick = 0; tick < VETERAN_PROFILE.reactionTicks; tick += 1) {
+      const result = decide(current, aiObservation(state, state.dummy, state.player), tick, VETERAN_PROFILE);
+      current = result.nextAiState;
+      expect(current.pattern).not.toBe('kill-instinct');
+    }
+    for (let tick = VETERAN_PROFILE.reactionTicks; tick <= VETERAN_PROFILE.reactionTicks + VETERAN_PROFILE.decisionIntervalTicks; tick += 1) {
+      const result = decide(current, aiObservation(state, state.dummy, state.player), tick, VETERAN_PROFILE);
+      current = result.nextAiState;
+      if (current.pattern === 'kill-instinct') break;
+    }
+    expect(current.pattern).toBe('kill-instinct');
+  });
+
+  it('is deterministic for the same seed and shared inputs', () => {
+    const inputs = Array.from({ length: 420 }, (_, tick) => neutral({
+      attackPressed: tick % 28 === 0,
+      blockHeld: tick % 90 >= 35 && tick % 90 < 60,
+      dodgePressed: tick % 137 === 0,
+      x: tick % 80 < 40 ? 0.25 : -0.1,
+    }));
+    const run = () => {
+      let state = createOpponentCombatState();
+      let ai = createAiState(8128, state.player, VETERAN_PROFILE);
+      const log: unknown[] = [];
+      for (const input of inputs) {
+        const result = stepCombatWithAi(state, input, ai, VETERAN_PROFILE);
+        state = result.state;
+        ai = result.aiState;
+        log.push([result.aiInput, result.events, ai.pattern]);
+        if (state.fightOver) break;
+      }
+      return { state, ai, log };
+    };
+    expect(run()).toEqual(run());
+  });
+
+  it('uses PRESSURE against held Block and pauses before a blocked swing would Expose it', () => {
+    const state = createOpponentCombatState();
+    state.player.currentAction = { type: 'block', phase: 'active' };
+    state.dummy.exposure = state.dummy.maxExposure - COMBAT_TUNING.exposure.blockedExposure;
+    const ai = createAiState(3, state.player, VETERAN_PROFILE);
+    const result = decide(ai, aiObservation(state, state.dummy, state.player), 0, VETERAN_PROFILE);
+    expect(result.nextAiState.pattern).toBe('pressure');
+    expect(result.input.attackPressed).toBe(false);
+    expect(result.input.blockHeld || Math.hypot(result.input.x, result.input.z) > 0).toBe(true);
+  });
+
+  it('COUNTER-GUARD reads a stationary spammer and attacks an observed recovery', () => {
+    let state = createOpponentCombatState();
+    let ai = createAiState(91, state.player, VETERAN_PROFILE);
+    let counterSeen = false;
+    let recoveryCounter = false;
+    for (let tick = 0; tick < 500 && !state.fightOver; tick += 1) {
+      const result = stepCombatWithAi(state, neutral({ attackPressed: true }), ai, VETERAN_PROFILE);
+      state = result.state;
+      ai = result.aiState;
+      counterSeen ||= ai.pattern === 'counter-guard';
+      recoveryCounter ||= result.aiInput.attackPressed
+        && ai.lastObserved.currentAction.type === 'attack'
+        && ai.lastObserved.currentAction.phase === 'recovery';
+    }
+    expect(counterSeen).toBe(true);
+    expect(recoveryCounter).toBe(true);
+  });
+
+  it('DESPERATION removes retreating and raises attack selection', () => {
+    let normalAttacks = 0;
+    let desperateAttacks = 0;
+    for (let seed = 1; seed <= 120; seed += 1) {
+      const normal = createOpponentCombatState();
+      const low = createOpponentCombatState();
+      low.dummy.health = low.dummy.maxHealth * VETERAN_PROFILE.desperationHealthRatio;
+      const normalDecision = decide(createAiState(seed, normal.player, VETERAN_PROFILE), aiObservation(normal, normal.dummy, normal.player), 0, VETERAN_PROFILE);
+      const lowDecision = decide(createAiState(seed, low.player, VETERAN_PROFILE), aiObservation(low, low.dummy, low.player), 0, VETERAN_PROFILE);
+      normalAttacks += Number(normalDecision.input.attackPressed);
+      desperateAttacks += Number(lowDecision.input.attackPressed);
+      expect(lowDecision.nextAiState.pattern).toBe('desperation');
+      const towardX = low.player.position.x - low.dummy.position.x;
+      const towardZ = low.player.position.z - low.dummy.position.z;
+      expect(lowDecision.input.x * towardX + lowDecision.input.z * towardZ).toBeGreaterThanOrEqual(0);
+    }
+    expect(desperateAttacks).toBeGreaterThan(normalAttacks);
+  });
+
+  it('KILL INSTINCT ignores exposure restraint and presses the low-health target', () => {
+    const state = createOpponentCombatState();
+    state.player.health = state.player.maxHealth * 0.3;
+    state.dummy.exposure = state.dummy.maxExposure;
+    const result = decide(createAiState(8, state.player, VETERAN_PROFILE), aiObservation(state, state.dummy, state.player), 0, VETERAN_PROFILE);
+    expect(result.nextAiState.pattern).toBe('kill-instinct');
+    expect(result.input.attackPressed).toBe(true);
+  });
+
+  it('never records more than 30 consecutive retreat ticks', () => {
+    let state = createOpponentCombatState();
+    let ai = createAiState(77, state.player, VETERAN_PROFILE);
+    state.dummy.stamina = 1;
+    for (let tick = 0; tick < 800 && !state.fightOver; tick += 1) {
+      const result = stepCombatWithAi(state, neutral({ x: -1 }), ai, VETERAN_PROFILE);
+      state = result.state;
+      ai = result.aiState;
+    }
+    expect(ai.longestRetreatTicks).toBeLessThanOrEqual(30);
+  });
+
+  it('RHYTHM BREAK varies first-attack timing across seeds', () => {
+    const rhythm = { ...VETERAN_PROFILE, pressureWeight: 0, counterGuardWeight: 0, rhythmBreakWeight: 1, rhythmBreakChance: 1 };
+    const timings = new Set<number>();
+    for (let seed = 1; seed <= 20; seed += 1) {
+      const state = createOpponentCombatState();
+      let ai = createAiState(seed, state.player, rhythm);
+      for (let tick = 0; tick < 60; tick += 1) {
+        const decision = decide(ai, aiObservation(state, state.dummy, state.player), tick, rhythm);
+        ai = decision.nextAiState;
+        if (decision.input.attackPressed) { timings.add(tick); break; }
+      }
+    }
+    expect(timings.size).toBeGreaterThan(2);
+    expect(Math.min(...timings)).toBeGreaterThanOrEqual(6);
+  });
+
+  it('finishes Veteran versus Rookie for twenty seeds', () => {
+    for (let seed = 1; seed <= 20; seed += 1) {
+      let state = createOpponentCombatState();
+      let rookie = createAiState(seed * 2, state.dummy, ROOKIE_PROFILE);
+      let veteran = createAiState(seed * 2 + 1, state.player, VETERAN_PROFILE);
+      for (let tick = 0; tick < 5400 && !state.fightOver; tick += 1) {
+        const rookieDecision = decide(rookie, aiObservation(state, state.player, state.dummy), state.tick, ROOKIE_PROFILE);
+        const veteranDecision = decide(veteran, aiObservation(state, state.dummy, state.player), state.tick, VETERAN_PROFILE);
+        rookie = rookieDecision.nextAiState;
+        veteran = veteranDecision.nextAiState;
+        state = stepCombatantPair(state, { player: rookieDecision.input, dummy: veteranDecision.input }).state;
+      }
+      expect(state.fightOver, `seed ${seed}`).toBe(true);
+    }
   });
 });

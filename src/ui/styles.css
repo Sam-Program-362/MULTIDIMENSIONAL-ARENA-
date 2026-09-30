@@ -45,6 +45,7 @@ form { display: grid; gap: 18px; } section { border: 1px solid #292b39; border-r
 .meter.exposure i { background: #ff9a3c; }
 .hud-fighter.exposed .meter.exposure i { background: #ff4a3c; animation: exposure-pulse .5s ease-in-out infinite; }
 .hud-fighter.exposed .hud-label:last-of-type span:last-child { color: #ff6a5c; font-weight: 700; }
+.ai-pattern { display: block; margin-top: 5px; color: #8f91a8; font: 8px 'DM Mono', monospace; text-transform: uppercase; }
 @keyframes exposure-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
 .fight-result { position: absolute; z-index: 5; top: 50%; left: 50%; display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 190px; padding: 18px; border: 1px solid #9c8cff; border-radius: 10px; background: #11131deb; box-shadow: 0 16px 50px #000a; transform: translate(-50%, -50%); }

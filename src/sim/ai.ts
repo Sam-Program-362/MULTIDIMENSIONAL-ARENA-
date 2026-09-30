@@ -13,7 +13,11 @@ import {
 import { createRngState, stepRng } from './rng';
 
 /** Every behavior value used by the basic controller lives in this profile. */
+export type AiTier = 'rookie' | 'veteran';
+export type AiPattern = 'neutral' | 'pressure' | 'rhythm-break' | 'counter-guard' | 'desperation' | 'kill-instinct';
+
 export interface AiProfile {
+  tier: AiTier;
   reactionTicks: number;
   decisionIntervalTicks: number;
   aggression: number;
@@ -56,9 +60,16 @@ export interface AiProfile {
   dashCloseDistance: number;
   dashCloseChance: number;
   dashMinStaminaRatio: number;
+  /** Veteran-only selection weights. They remain data, not hidden controller constants. */
+  pressureWeight: number;
+  rhythmBreakWeight: number;
+  counterGuardWeight: number;
+  rhythmBreakChance: number;
+  desperationHealthRatio: number;
 }
 
 export const ROOKIE_PROFILE: Readonly<AiProfile> = {
+  tier: 'rookie',
   reactionTicks: 18,
   decisionIntervalTicks: 12,
   aggression: 0.38,
@@ -92,6 +103,37 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   dashCloseDistance: 4.5,
   dashCloseChance: 0.45,
   dashMinStaminaRatio: 0.35,
+  pressureWeight: 0,
+  rhythmBreakWeight: 0,
+  counterGuardWeight: 0,
+  rhythmBreakChance: 0,
+  desperationHealthRatio: 0.3,
+} as const;
+
+/** Opt-in arena fighter. Rookie values and its controller path remain untouched. */
+export const VETERAN_PROFILE: Readonly<AiProfile> = {
+  ...ROOKIE_PROFILE,
+  tier: 'veteran',
+  reactionTicks: 13,
+  decisionIntervalTicks: 8,
+  aggression: 0.70,
+  caution: 0.62,
+  mistakeChance: 0.05,
+  punishChance: 0.90,
+  retreatTicks: 0,
+  restraintExposureRatio: 0.70,
+  guardChance: 0.48,
+  normalBlockHoldTicks: 16,
+  mistakeBlockHoldTicks: 24,
+  guardHoldTicksMin: 10,
+  guardHoldTicksMax: 22,
+  guardGapTicks: 8,
+  dashCloseChance: 0.60,
+  pressureWeight: 0.72,
+  rhythmBreakWeight: 0.34,
+  counterGuardWeight: 0.78,
+  rhythmBreakChance: 0.38,
+  desperationHealthRatio: 0.3,
 } as const;
 
 export type StaminaBand = 'low' | 'ok';
@@ -106,6 +148,9 @@ export interface AiTargetSnapshot {
   /** Public exposure state; delayed with the rest of the snapshot. */
   exposed: boolean;
   exposure: number;
+  healthRatio: number;
+  guardBroken: boolean;
+  attackCooldownRemaining: number;
   defeated: boolean;
 }
 
@@ -121,6 +166,14 @@ export interface AiMistakeCounts {
   outsideAttack: number;
   overblock: number;
   overcommit: number;
+}
+
+export interface AiHabitSample {
+  attackStart: boolean;
+  dodgeStart: boolean;
+  blockHeld: boolean;
+  approach: boolean;
+  retreat: boolean;
 }
 
 export type AiDecisionReason =
@@ -154,6 +207,17 @@ export interface AiState {
   decisionCount: number;
   mistakes: AiMistakeCounts;
   lastDecision: AiDecisionReason;
+  /** Veteran-only per-fight memory, populated from delayed snapshots and reset by createAiState. */
+  habitWindow: AiHabitSample[];
+  lastObserved: AiTargetSnapshot;
+  lastObservedDistance: number;
+  pattern: AiPattern;
+  patternUntilTick: number;
+  patternCounts: Record<AiPattern, number>;
+  delayedAttackUntilTick: number;
+  chainRemaining: number;
+  consecutiveRetreatTicks: number;
+  longestRetreatTicks: number;
 }
 
 export interface AiDecision {
@@ -174,6 +238,9 @@ const neutralSnapshot = (): AiTargetSnapshot => ({
   staminaBand: 'ok',
   exposed: false,
   exposure: 0,
+  healthRatio: 1,
+  guardBroken: false,
+  attackCooldownRemaining: 0,
   defeated: false,
 });
 
@@ -186,6 +253,9 @@ function targetSnapshot(target: CombatantState): AiTargetSnapshot {
     staminaBand: target.stamina / target.maxStamina <= COMBAT_TUNING.lowStaminaThreshold ? 'low' : 'ok',
     exposed: target.exposed,
     exposure: target.exposure,
+    healthRatio: target.maxHealth > 0 ? target.health / target.maxHealth : 0,
+    guardBroken: target.guardBroken,
+    attackCooldownRemaining: target.attackCooldownRemaining,
     defeated: target.defeated,
   };
 }
@@ -219,6 +289,23 @@ export function createAiState(
     decisionCount: 0,
     mistakes: { outsideAttack: 0, overblock: 0, overcommit: 0 },
     lastDecision: 'waiting',
+    habitWindow: [],
+    lastObserved: cloneSnapshot(initial),
+    lastObservedDistance: Number.POSITIVE_INFINITY,
+    pattern: 'neutral',
+    patternUntilTick: 0,
+    patternCounts: {
+      neutral: 0,
+      pressure: 0,
+      'rhythm-break': 0,
+      'counter-guard': 0,
+      desperation: 0,
+      'kill-instinct': 0,
+    },
+    delayedAttackUntilTick: 0,
+    chainRemaining: 0,
+    consecutiveRetreatTicks: 0,
+    longestRetreatTicks: 0,
   };
 }
 
@@ -309,6 +396,246 @@ function currentInput(state: AiState, self: CombatantState, tick: number): Comba
   };
 }
 
+function habitRatios(samples: AiHabitSample[]): { block: number; attack: number; dodge: number } {
+  const size = Math.max(1, samples.length);
+  return {
+    block: samples.filter((sample) => sample.blockHeld).length / size,
+    attack: samples.filter((sample) => sample.attackStart).length / size,
+    dodge: samples.filter((sample) => sample.dodgeStart).length / size,
+  };
+}
+
+function selectVeteranPattern(
+  current: AiPattern,
+  currentUntil: number,
+  tick: number,
+  target: AiTargetSnapshot,
+  selfHealthRatio: number,
+  ratios: ReturnType<typeof habitRatios>,
+  profile: AiProfile,
+  roll: number,
+): AiPattern {
+  if (target.healthRatio <= profile.desperationHealthRatio) return 'kill-instinct';
+  if (selfHealthRatio <= profile.desperationHealthRatio) return 'desperation';
+  if (tick < currentUntil && current !== 'neutral') return current;
+  if (target.currentAction.type === 'block' || ratios.block >= 0.22) return 'pressure';
+  if (ratios.attack >= 0.018 && roll < profile.counterGuardWeight) return 'counter-guard';
+  if (roll < profile.rhythmBreakWeight) return 'rhythm-break';
+  return roll < profile.rhythmBreakWeight + profile.pressureWeight * 0.25 ? 'pressure' : 'neutral';
+}
+
+/** Veteran controller: deterministic patterns built only from the same delayed public snapshots. */
+function decideVeteran(
+  aiState: AiState,
+  observation: AiObservation,
+  tick: number,
+  profile: AiProfile,
+): AiDecision {
+  const delayed = delayedHistory(aiState, targetSnapshot(observation.target), profile.reactionTicks);
+  const target = delayed.observed;
+  const self = observation.self;
+  const distance = lengthOf({ x: target.position.x - self.position.x, z: target.position.z - self.position.z });
+  const actionStarted = target.currentAction.type !== aiState.lastObserved.currentAction.type
+    || target.currentAction.type !== 'idle' && target.actionTick < aiState.lastObserved.actionTick;
+  const sample: AiHabitSample = {
+    attackStart: actionStarted && target.currentAction.type === 'attack',
+    dodgeStart: actionStarted && target.currentAction.type === 'dodge',
+    blockHeld: target.currentAction.type === 'block'
+      && (target.currentAction.phase === 'startup' || target.currentAction.phase === 'active'),
+    approach: distance < aiState.lastObservedDistance - 0.01,
+    retreat: distance > aiState.lastObservedDistance + 0.01,
+  };
+  const habitWindow = [...aiState.habitWindow, sample].slice(-300);
+
+  const toward = normalized({ x: target.position.x - self.position.x, z: target.position.z - self.position.z });
+  const heldDot = aiState.heldMovement.x * toward.x + aiState.heldMovement.z * toward.z;
+  const isDodge = self.currentAction.type === 'dodge';
+  let consecutiveRetreatTicks = !isDodge && heldDot < -0.05 ? aiState.consecutiveRetreatTicks + 1 : 0;
+  let heldMovement = { ...aiState.heldMovement };
+  if (consecutiveRetreatTicks >= 30) {
+    heldMovement = { x: toward.x * profile.approachStrength, z: toward.z * profile.approachStrength };
+    consecutiveRetreatTicks = 0;
+  }
+  const baseState: AiState = {
+    ...aiState,
+    history: delayed.history,
+    habitWindow,
+    lastObserved: cloneSnapshot(target),
+    lastObservedDistance: distance,
+    heldMovement,
+    mistakes: { ...aiState.mistakes },
+    patternCounts: { ...aiState.patternCounts },
+    consecutiveRetreatTicks,
+    longestRetreatTicks: Math.max(aiState.longestRetreatTicks, consecutiveRetreatTicks),
+  };
+  if (tick < aiState.nextDecisionTick || self.defeated || target.defeated) {
+    return { input: currentInput(baseState, self, tick), nextAiState: baseState };
+  }
+
+  let rngState = aiState.rngState;
+  const random = (): number => {
+    const next = stepRng(rngState);
+    rngState = next.state;
+    return next.value;
+  };
+  // Always consume the same draws at every Veteran decision.
+  const patternRoll = random();
+  const attackRoll = random();
+  const mistakeRoll = random();
+  const defenseRoll = random();
+  const rhythmRoll = random();
+  const delayRoll = random();
+  const dashRoll = random();
+  const circleRoll = random();
+
+  const ratios = habitRatios(habitWindow);
+  const selfHealthRatio = self.maxHealth > 0 ? self.health / self.maxHealth : 0;
+  let pattern = selectVeteranPattern(
+    aiState.pattern,
+    aiState.patternUntilTick,
+    tick,
+    target,
+    selfHealthRatio,
+    ratios,
+    profile,
+    patternRoll,
+  );
+  const enteredPattern = pattern !== aiState.pattern || tick >= aiState.patternUntilTick;
+  const patternCounts = { ...aiState.patternCounts };
+  if (enteredPattern) patternCounts[pattern] += 1;
+  const patternUntilTick = enteredPattern ? tick + 24 : aiState.patternUntilTick;
+  const killMode = pattern === 'kill-instinct';
+  const desperate = pattern === 'desperation';
+  const targetPunishable = target.exposed || target.guardBroken
+    || target.currentAction.type === 'stagger'
+    || target.currentAction.type === 'attack' && target.currentAction.phase === 'recovery'
+    || target.currentAction.type === 'dodge' && target.currentAction.phase === 'recovery';
+  let chainRemaining = targetPunishable ? 3 : aiState.chainRemaining;
+
+  const attack = COMBAT_TUNING.attack;
+  const inRange = distance <= attack.range;
+  const idle = self.currentAction.type === 'idle';
+  const canAttack = idle && self.stamina >= attack.staminaCost
+    && self.attackCooldownRemaining < COMBAT_TUNING.inputBufferTicks;
+  const canDodge = idle && self.stamina >= COMBAT_TUNING.dodge.staminaCost;
+  const projectedBlockedExposure = self.exposure + COMBAT_TUNING.exposure.blockedExposure;
+  const exposureRisk = projectedBlockedExposure >= self.maxExposure;
+  const restrained = self.exposure / self.maxExposure >= profile.restraintExposureRatio;
+  const ordinaryAllowed = killMode || desperate || !restrained;
+  const input: CombatInput = { ...NEUTRAL_COMBAT_INPUT };
+  let reason: AiDecisionReason = 'circle';
+  let blockUntilTick = aiState.blockUntilTick;
+  let guardReadyTick = aiState.guardReadyTick;
+  let delayedAttackUntilTick = aiState.delayedAttackUntilTick;
+
+  // Default stance is forward pressure/circling, never an open-ended retreat.
+  heldMovement = movementAtRange(self, target, profile, aiState.circleDirection);
+  if (pattern === 'pressure' || killMode || desperate) {
+    heldMovement = distance > attack.range * 0.82
+      ? { x: toward.x * profile.approachStrength, z: toward.z * profile.approachStrength }
+      : { x: 0, z: 0 };
+  }
+
+  const observedIncoming = target.currentAction.type === 'attack'
+    && (target.currentAction.phase === 'startup' || target.currentAction.phase === 'active');
+  if (observedIncoming && canDodge && (desperate ? defenseRoll < 0.68 : defenseRoll < 0.34)) {
+    input.x = -toward.x;
+    input.z = -toward.z;
+    input.dodgePressed = true;
+    reason = 'defend-dodge';
+  } else if (targetPunishable && canAttack && inRange && (chainRemaining > 0 || attackRoll < profile.punishChance)) {
+    input.attackPressed = true;
+    chainRemaining = Math.max(0, chainRemaining - 1);
+    reason = 'punish';
+  } else if (pattern === 'counter-guard') {
+    const counterOpening = target.exposed || target.guardBroken
+      || target.currentAction.type === 'attack' && target.currentAction.phase === 'recovery'
+      || target.attackCooldownRemaining > COMBAT_TUNING.inputBufferTicks;
+    if (counterOpening && canAttack && inRange) {
+      input.attackPressed = true;
+      blockUntilTick = tick;
+      reason = 'punish';
+    } else if (idle && inRange && self.endurance / self.maxEndurance >= profile.minEnduranceRatioToGuard) {
+      // One decision beat only: releasing between observations permits endurance recovery.
+      blockUntilTick = tick + profile.decisionIntervalTicks;
+      guardReadyTick = blockUntilTick + 1;
+      input.blockHeld = true;
+      reason = 'guard-stance';
+    }
+  } else if (pattern === 'pressure' && exposureRisk && !killMode) {
+    // A blocked next swing would reach the cap: pause behind guard or just outside reach.
+    if (idle && self.endurance / self.maxEndurance >= profile.minEnduranceRatioToGuard) {
+      blockUntilTick = tick + profile.decisionIntervalTicks;
+      input.blockHeld = true;
+      reason = 'guard-stance';
+    } else {
+      input.x = -toward.x * 0.35;
+      input.z = -toward.z * 0.35;
+      heldMovement = { x: input.x, z: input.z };
+      reason = 'retreat';
+    }
+  } else if (pattern === 'rhythm-break' && canAttack && inRange && ordinaryAllowed) {
+    if (delayedAttackUntilTick > 0) {
+      if (tick >= delayedAttackUntilTick) {
+        input.attackPressed = true;
+        delayedAttackUntilTick = 0;
+        reason = 'attack';
+      } else {
+        reason = 'waiting';
+      }
+    } else if (rhythmRoll < profile.rhythmBreakChance) {
+      delayedAttackUntilTick = tick + 6 + Math.floor(delayRoll * 13);
+      reason = 'waiting';
+    } else {
+      input.attackPressed = true;
+      reason = 'attack';
+    }
+  } else if (canAttack && inRange && ordinaryAllowed
+    && (killMode || desperate || attackRoll < profile.aggression)
+    && mistakeRoll >= (desperate ? profile.mistakeChance / 2 : profile.mistakeChance)) {
+    input.attackPressed = true;
+    reason = 'attack';
+  } else if (idle && distance > profile.dashCloseDistance && canDodge
+    && self.stamina / self.maxStamina >= profile.dashMinStaminaRatio && dashRoll < profile.dashCloseChance) {
+    input.x = toward.x;
+    input.z = toward.z;
+    input.dodgePressed = true;
+    reason = 'dash-close';
+  } else {
+    input.x = heldMovement.x;
+    input.z = heldMovement.z;
+    reason = distance > attack.range ? 'approach' : 'circle';
+  }
+
+  if (!input.dodgePressed && !input.blockHeld && !input.attackPressed) {
+    input.x = heldMovement.x;
+    input.z = heldMovement.z;
+  }
+  if (circleRoll < profile.circleSwitchChance) baseState.circleDirection = baseState.circleDirection === 1 ? -1 : 1;
+  heldMovement = steerInsideBounds({ x: input.x, z: input.z }, self, observation.bounds, profile.wallBuffer);
+  input.x = heldMovement.x;
+  input.z = heldMovement.z;
+
+  return {
+    input,
+    nextAiState: {
+      ...baseState,
+      rngState,
+      nextDecisionTick: tick + profile.decisionIntervalTicks,
+      blockUntilTick,
+      guardReadyTick,
+      heldMovement,
+      decisionCount: aiState.decisionCount + 1,
+      lastDecision: reason,
+      pattern,
+      patternUntilTick,
+      patternCounts,
+      delayedAttackUntilTick,
+      chainRemaining,
+    },
+  };
+}
+
 /**
  * Deterministic rookie controller. The target's current snapshot is appended to history, but all
  * decisions use the snapshot exactly `reactionTicks` old. No target input is accepted or read.
@@ -319,6 +646,7 @@ export function decide(
   tick: number,
   profile: AiProfile = ROOKIE_PROFILE,
 ): AiDecision {
+  if (profile.tier === 'veteran') return decideVeteran(aiState, observation, tick, profile);
   const delayed = delayedHistory(aiState, targetSnapshot(observation.target), profile.reactionTicks);
   const baseState: AiState = {
     ...aiState,
@@ -549,6 +877,9 @@ export function stepCombatWithAi(
         history: aiState.history.map(cloneSnapshot),
         heldMovement: { ...aiState.heldMovement },
         mistakes: { ...aiState.mistakes },
+        habitWindow: aiState.habitWindow.map((sample) => ({ ...sample })),
+        lastObserved: cloneSnapshot(aiState.lastObserved),
+        patternCounts: { ...aiState.patternCounts },
       },
       aiInput: { ...NEUTRAL_COMBAT_INPUT },
     };

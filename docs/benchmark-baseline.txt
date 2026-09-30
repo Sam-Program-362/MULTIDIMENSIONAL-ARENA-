@@ -1,21 +1,31 @@
-=== BASELINE — Phase 1c.3 source, 40 seeds, 5400 tick cap (90s @ 60/s) ===
+=== PHASE 1c.5 BASELINE — Phase 1c.4 source, 40 seeds, 5400 ticks (90s @ 60/s) ===
 
-This baseline adds Phase 1c.4's novice proxy and accuracy reporting to the unchanged
-1c.3 combat/profile source. Scenario (e) is reported in the original direction:
-the counter-puncher must win at least 55%.
+Run before implementation with the committed Phase 1c.4 benchmark. That script supported only the
+Rookie tier and did not yet record guard-break timing or named patterns. Veteran is therefore
+reported honestly as not available rather than reconstructed from final code.
 
-# Scenario              Result                                      Goal                         Pass
-a Stationary spammer    spammer 60.0% (AI 27.5%)                    spammer <= 50%               FAIL
-b Idle player            AI 100.0%, draws 0, stalemates 0            AI >= 95%, no draw/stale     PASS
-c Holds Block forever    AI 97.5%                                    AI >= 90%                    PASS
-d Runs away + Dodge      avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks                PASS
-e Counter-puncher        counter 10.0% / AI 90.0%                    counter >= 55%              FAIL
-h Novice human proxy     novice 17.5% / AI 82.5% / draws 0            novice 40–60%, AI whiff >=30% FAIL
-f Two spammers            player 37.5% / dummy 57.5% / draw 2         each 35–65%                 PASS
-g AI vs AI                finished 40/40, avg 406 ticks               no stalemate                 PASS
+ROOKIE
+#  Scenario              Result
+(a) Stationary spammer   spammer 75.0%, AI 20.0% (remainder draws)
+(b) Idle                 AI 100.0%, draws 0, stalemates 0
+(c) Block forever        AI 0.0%; guard-break rate/time not recorded
+(d) Runaway dodger       average reach 180.9 ticks (3.01s), never 0
+(e) Counter-puncher      AI 52.5%, counter 47.5%
+(h) Novice proxy         novice 57.5%, AI 42.5%, draws 0
+(g) Rookie vs Rookie     40/40 finished, average 617 ticks
 
-Accuracy (AI attack outcomes; 40 seeds):
-- vs stationary spammer: hit 100.0%, blocked 0.0%, whiff 0.0%.
-- vs novice proxy: hit 92.8%, blocked 0.0%, whiff 7.2%.
+Rookie AI attack outcomes:
+- versus novice: hit 64.7%, blocked 0.0%, whiff 35.3%
+- versus stationary spammer: hit 100.0%, blocked 0.0%, whiff 0.0%
 
-6/9 reported goals met (accuracy is report-only; h and e fail in baseline).
+VETERAN
+#  Scenario / pattern    Baseline
+All                      N/A — VETERAN_PROFILE and Veteran controller did not exist
+Pressure usage           N/A
+Counter-Guard usage      N/A
+Desperation usage        N/A
+Longest retreat          N/A
+Veteran vs Rookie        N/A
+
+The baseline missed Block-forever because endurance regenerated while Block remained held. The
+baseline command output is preserved in the implementation report; no baseline source was changed.
