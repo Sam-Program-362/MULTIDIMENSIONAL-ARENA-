@@ -1,15 +1,19 @@
 import {
+  AiState,
   CombatEvent,
   CombatInput,
   CombatState,
   Fighter,
   FighterInput,
+  createAiState,
   createCombatState,
   createFighter,
   describeCondition,
+  fightOutcome,
   joystickInput,
   joystickKnobOffset,
   stepCombat,
+  stepCombatWithAi,
   ticksForElapsed,
 } from '../sim';
 import { browserStorage } from '../storage';
@@ -79,13 +83,17 @@ export function renderProfile(fighter: Fighter): void {
 
 const arenaMarkup = (fighterName: string): string => `<main class="arena-screen">
   <button class="leave" id="leave">Leave</button>
+  <div class="mode-toggle" role="group" aria-label="Opponent mode">
+    <button type="button" data-mode="opponent" aria-pressed="true">Opponent</button>
+    <button type="button" data-mode="dummy" aria-pressed="false">Dummy</button>
+  </div>
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
     <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong>Training Dummy</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-name>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
   </aside>
-  <div class="fight-result" id="fight-result" hidden><strong>Dummy defeated</strong><span>Training complete.</span><button class="primary" id="reset-fight">Reset</button></div>
+  <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-note>Well fought.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
   <div class="combat-controls" aria-label="Combat controls">
     <button class="combat-button attack-button" data-control="attack" aria-label="Attack">Attack<kbd>J</kbd></button>
@@ -107,6 +115,10 @@ export function renderArena(): void {
   const pad = root.querySelector<HTMLElement>('#joystick')!;
   const stick = pad.querySelector<HTMLElement>('.stick')!;
   const resultPanel = root.querySelector<HTMLElement>('#fight-result')!;
+  const resultTitle = resultPanel.querySelector<HTMLElement>('[data-result-title]')!;
+  const resultNote = resultPanel.querySelector<HTMLElement>('[data-result-note]')!;
+  const opponentName = root.querySelector<HTMLElement>('[data-opponent-name]')!;
+  const modeButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mode]'));
   const actionButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-control]'));
   const cleanup: Array<() => void> = [];
   const on = <K extends keyof WindowEventMap>(target: Window, type: K, listener: (event: WindowEventMap[K]) => void) => {
@@ -114,7 +126,12 @@ export function renderArena(): void {
     cleanup.push(() => target.removeEventListener(type, listener as EventListener));
   };
 
+  // 'opponent' pits the player against the Rookie AI; 'dummy' keeps the passive training dummy.
+  let mode: 'opponent' | 'dummy' = 'opponent';
   let state = createCombatState(fighter.hiddenStats);
+  // The AI's RNG lives in aiState; a fresh seed per fight keeps each restart reproducible-but-varied.
+  let aiSeed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+  let aiState: AiState = createAiState(aiSeed);
   let accumulator = 0;
   let last = performance.now();
   let frame = 0;
@@ -278,7 +295,18 @@ export function renderArena(): void {
   const updateHud = () => {
     updateHudCombatant('player', state.player);
     updateHudCombatant('dummy', state.dummy);
-    resultPanel.hidden = !state.dummy.defeated;
+    const outcome = fightOutcome(state);
+    resultPanel.hidden = outcome === null;
+    if (outcome === 'player') {
+      resultTitle.textContent = mode === 'dummy' ? 'Dummy defeated' : 'Opponent defeated';
+      resultNote.textContent = mode === 'dummy' ? 'Training complete.' : 'Well fought.';
+    } else if (outcome === 'opponent') {
+      resultTitle.textContent = 'You were defeated';
+      resultNote.textContent = 'The opponent got the better of you.';
+    } else if (outcome === 'draw') {
+      resultTitle.textContent = 'Double knockout';
+      resultNote.textContent = 'You fell together.';
+    }
   };
 
   const project = (position: { x: number; z: number }) => {
@@ -309,7 +337,10 @@ export function renderArena(): void {
       ctx.stroke();
     }
 
-    ctx.fillStyle = flash ? '#ffffff' : combatant.defeated ? '#55586a' : isPlayer ? '#b9adff' : '#ffb56b';
+    // The active AI opponent gets its own crimson so it never looks like the passive orange dummy.
+    const bodyColor = isPlayer ? '#b9adff' : mode === 'opponent' ? '#ff6b7d' : '#ffb56b';
+    const facingColor = isPlayer ? '#ded8ff' : mode === 'opponent' ? '#ffd2d8' : '#ffe0bc';
+    ctx.fillStyle = flash ? '#ffffff' : combatant.defeated ? '#55586a' : bodyColor;
     ctx.beginPath();
     if (combatant.defeated) ctx.ellipse(point.x, point.y + 4, 22, 8, -0.18, 0, Math.PI * 2);
     else ctx.arc(point.x, point.y, isPlayer ? 13 : 15, 0, Math.PI * 2);
@@ -318,7 +349,7 @@ export function renderArena(): void {
     if (!combatant.defeated) {
       const facingEndX = point.x + combatant.facing.x * 26;
       const facingEndY = point.y + combatant.facing.z * 15;
-      ctx.strokeStyle = isPlayer ? '#ded8ff' : '#ffe0bc';
+      ctx.strokeStyle = facingColor;
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(point.x, point.y);
@@ -367,15 +398,35 @@ export function renderArena(): void {
 
   const resetFight = () => {
     state = createCombatState(fighter.hiddenStats);
+    // In opponent mode the second combatant is an active AI; in dummy mode it stays stationary.
+    state.dummy.stationary = mode !== 'opponent';
+    aiSeed = (aiSeed * 1664525 + 1013904223) >>> 0; // A fresh seed so each restart plays out anew.
+    aiState = createAiState(aiSeed);
     accumulator = 0;
     last = performance.now();
     clearHeldInput();
     flashTicks.player = flashTicks.dummy = 0;
     blockFlashTicks.player = blockFlashTicks.dummy = 0;
     dodgeFlashTicks.player = dodgeFlashTicks.dummy = 0;
+    resultPanel.hidden = true;
     draw();
   };
   root.querySelector('#reset-fight')!.addEventListener('click', resetFight);
+
+  const applyMode = (next: 'opponent' | 'dummy') => {
+    mode = next;
+    opponentName.textContent = mode === 'opponent' ? 'Rookie Opponent' : 'Training Dummy';
+    for (const button of modeButtons) {
+      const active = button.dataset.mode === mode;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.classList.toggle('active', active);
+    }
+    resetFight(); // Switching opponent modes always restarts the fight.
+  };
+  for (const button of modeButtons) {
+    button.addEventListener('click', () => applyMode(button.dataset.mode === 'dummy' ? 'dummy' : 'opponent'));
+  }
+  applyMode('opponent');
 
   const leave = () => {
     cancelAnimationFrame(frame);
@@ -399,7 +450,14 @@ export function renderArena(): void {
       };
       attackQueued = false;
       dodgeQueued = false;
-      const result = stepCombat(state, input);
+      let result;
+      if (mode === 'opponent') {
+        const stepped = stepCombatWithAi(state, input, aiState);
+        result = stepped.result;
+        aiState = stepped.aiState;
+      } else {
+        result = stepCombat(state, input);
+      }
       state = result.state;
       handleEvents(result.events);
       flashTicks.player = Math.max(0, flashTicks.player - 1);

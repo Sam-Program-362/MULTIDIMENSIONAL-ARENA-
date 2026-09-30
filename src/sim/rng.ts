@@ -9,6 +9,19 @@ export function createRng(seed: number): () => number {
   };
 }
 
+/**
+ * Pure single-step of the same PRNG as `createRng`, exposed so callers that need to persist and
+ * serialize the generator state (for example a deterministic AI whose RNG lives inside its own
+ * state) can advance it without a hidden closure. Returns the drawn value and the next state.
+ */
+export function nextRandom(state: number): { value: number; state: number } {
+  let next = (state >>> 0) || 0x6d2b79f5;
+  next = Math.imul(next ^ (next >>> 16), 0x21f0aaad);
+  next = Math.imul(next ^ (next >>> 15), 0x735a2d97);
+  next ^= next >>> 15;
+  return { value: (next >>> 0) / 4294967296, state: next >>> 0 };
+}
+
 export function seedFromText(text: string): number {
   let hash = 2166136261;
   for (let index = 0; index < text.length; index += 1) {
