@@ -110,6 +110,41 @@ describe('exposure buckets and decay', () => {
 });
 
 describe('reaching the Exposed state', () => {
+  it('one whiff adds 30, three minimum-interval whiffs add 90, and the fourth Exposes', () => {
+    expect(EXP.whiffExposure).toBe(30);
+    let state = pair();
+    state.player.position = { x: 0, z: 0 };
+    state.dummy.position = { x: 9, z: 6 };
+    let whiffs = 0;
+    while (whiffs < 4) {
+      const result = pairStep(state, { attackPressed: true });
+      state = result.state;
+      if (result.events.some((event) => event.type === 'ATTACK_MISSED' && event.actorId === 'player')) {
+        whiffs += 1;
+        if (whiffs === 1) expect(state.player.exposure).toBe(30);
+        if (whiffs === 3) {
+          expect(state.player.exposure).toBe(90);
+          expect(state.player.exposed).toBe(false);
+        }
+      }
+    }
+    expect(state.player.exposed).toBe(true);
+    expect(state.player.exposure).toBe(EXP.maxExposure);
+  });
+
+  it('three consecutive blocked attacks at 35 each make the attacker Exposed', () => {
+    expect(EXP.blockedExposure).toBe(35);
+    let state = pair();
+    let blocked = 0;
+    while (blocked < 3) {
+      const result = pairStep(state, { attackPressed: true }, { blockHeld: true });
+      state = result.state;
+      if (result.events.some((event) => event.type === 'ATTACK_BLOCKED' && event.actorId === 'player')) blocked += 1;
+    }
+    expect(state.player.exposed).toBe(true);
+    expect(state.player.exposure).toBe(EXP.maxExposure);
+  });
+
   it('continuous whiffing at the minimum interval reaches Exposed in the expected tick count', () => {
     let state = pair();
     state.player.position = { x: 0, z: 0 };
@@ -122,15 +157,9 @@ describe('reaching the Exposed state', () => {
       whiffs += result.events.filter((e) => e.type === 'ATTACK_MISSED' && e.actorId === 'player').length;
       if (result.events.some((e) => e.type === 'EXPOSED_STARTED' && e.actorId === 'player')) exposedTick = state.tick;
     }
-    // Each whiff adds whiffExposure; decay removes decayPerTick/tick. Model the number of whiffs
-    // needed so the assertion tracks the tuning rather than a magic number.
-    let modelled = 0;
-    let count = 0;
-    while (modelled < EXP.maxExposure) {
-      modelled = Math.max(0, modelled - EXP.decayPerTick * ATTACK.minIntervalTicks) + EXP.whiffExposure;
-      count += 1;
-      if (count > 100) break;
-    }
+    // The minimum interval is shorter than the decay delay, and each gain restarts that delay,
+    // so no decay occurs between consecutive whiffs.
+    const count = Math.ceil(EXP.maxExposure / EXP.whiffExposure);
     expect(exposedTick).not.toBeNull();
     expect(whiffs).toBe(count);
     // Sanity: it happens within a small number of attack intervals.

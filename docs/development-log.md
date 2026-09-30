@@ -78,3 +78,24 @@ The final novice result is 50.0% wins with 38.9% AI whiffs, meeting that accepta
 The stationary spammer, permanent blocker, runaway timing, and original-direction counter goal
 remain misses under the fixed behavior; these are documented honestly in benchmark-final.txt.
 Spacing/engagement AI, adaptive AI, feints, and parry remain planned only.
+
+## 2026-09-30 — Phase 1c.5 — exposure feel, held-guard endurance, and Veteran
+
+Phone tuning lowered whiff Exposure from 45 to 30 and blocked Exposure from 40 to 35; clean-hit
+Exposure remains 5, with the existing 60-tick delay, 0.25/tick decay, cap, duration, proportional
+damage bonus, and quarter reset. Endurance regeneration and its outstanding blocked-hit delay now
+pause throughout Block startup/active. Releasing Block must then serve the full 45-tick delay;
+quick release/re-hold gaps cannot sustain a permanent guard. Guard-break values are unchanged.
+
+Added the opt-in deterministic Veteran profile and controller path. It reads only delayed public
+snapshots, keeps a 300-tick per-fight habit window, and emits shared `CombatInput` for Pressure,
+Rhythm Break, Counter-Guard, Desperation, and Kill Instinct patterns. It predicts blocked-swing
+Exposure before pressure attacks unless killing, counters observed spam recovery, increases
+commitment at <=30% health, ignores restraint against a <=30% target, and caps ordinary retreat at
+30 ticks. Dummy / Rookie / Veteran mode changes restart the fight; Rookie remains the default and
+its profile/controller values are unchanged. The removable debug HUD shows the Veteran pattern.
+
+The benchmark now reports both tiers over 40 seeds, guard-break timing, pattern usage, and Veteran
+versus Rookie. Combat/AI remain DOM-free and session-only; save schema version 1 is unchanged.
+Adaptive learning across fights, feints, parry/perfect block, heavy attacks, and weapons remain
+planned only.

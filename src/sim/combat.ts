@@ -78,9 +78,9 @@ export const COMBAT_TUNING = {
   exposure: {
     maxExposure: 100,
     /** Attack finished or evaded (including a target's dodge i-frames) without connecting. */
-    whiffExposure: 45,
+    whiffExposure: 30,
     /** Attack was blocked by the target. */
-    blockedExposure: 40,
+    blockedExposure: 35,
     /** Attack connected. */
     hitExposure: 5,
     /** Exposure starts decaying only after this many ticks without a gain. */
@@ -785,12 +785,13 @@ function regenerateStamina(actor: CombatantState, actionThisTick: CurrentAction)
 }
 
 /**
- * Endurance recovers only after `enduranceRegenDelayTicks` ticks without a blocked hit. It does
- * not care whether block is held; it is paused only while the guard-break stagger runs, because
- * the stagger restores endurance to a fixed ratio when it ends.
+ * Endurance recovers only after `enduranceRegenDelayTicks` ticks without a blocked hit and only
+ * while Block is not held. A startup/active block pauses both regeneration and the outstanding
+ * delay, so releasing and quickly re-holding cannot consume the delay for free. Guard-break
+ * stagger remains a separate pause whose delay is installed when the stagger ends.
  */
-function regenerateEndurance(actor: CombatantState): void {
-  if (actor.defeated || actor.guardBroken) return;
+function regenerateEndurance(actor: CombatantState, actionThisTick: CurrentAction): void {
+  if (actor.defeated || actor.guardBroken || pausesStaminaRegen(actionThisTick) && actionThisTick.type === 'block') return;
   if (actor.enduranceRegenDelay > 0) {
     actor.enduranceRegenDelay -= 1;
     return;
@@ -895,7 +896,7 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
     const actionThisTick: CurrentAction = { ...actor.currentAction };
     finishOrAdvanceAction(actor);
     regenerateStamina(actor, actionThisTick);
-    regenerateEndurance(actor);
+    regenerateEndurance(actor, actionThisTick);
     updateExposure(actor, events, next.tick);
     tickAttackCooldown(actor);
     decrementBuffers(actor);

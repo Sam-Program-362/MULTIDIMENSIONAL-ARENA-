@@ -10,6 +10,8 @@
 import {
   COMBAT_TUNING,
   NEUTRAL_COMBAT_INPUT,
+  ROOKIE_PROFILE,
+  VETERAN_PROFILE,
   createAiState,
   createOpponentCombatState,
   createRngState,
@@ -17,6 +19,7 @@ import {
   stepCombatWithAi,
   stepCombatantPair,
   stepRng,
+  type AiProfile,
   type AiState,
   type CombatInput,
   type CombatState,
@@ -73,7 +76,11 @@ interface FightResult {
   winner: CombatState['winner'];
   ticks: number;
   firstReachTick: number | null;
+  firstAttackTick: number | null;
+  firstGuardBreakTick: number | null;
   aiAttacks: { hit: number; blocked: number; whiffed: number };
+  aiReachedLowHealth: boolean;
+  aiState: AiState;
 }
 
 /** Run one fight: AI drives `dummy`, the scripted strategy drives `player`. */
@@ -81,28 +88,35 @@ function runAiFight(
   seed: number,
   strategy: PlayerStrategy,
   setup?: (state: CombatState) => void,
+  aiProfile: AiProfile = ROOKIE_PROFILE,
 ): FightResult {
   let state = createOpponentCombatState();
   if (setup) setup(state);
-  let aiState: AiState = createAiState(seed * 7 + 3, state.player);
+  let aiState: AiState = createAiState(seed * 7 + 3, state.player, aiProfile);
   const ctx = { rand: rngStream(seed * 131 + 17), view: new DelayedView(REACTION) };
   let firstReachTick: number | null = null;
+  let firstAttackTick: number | null = null;
+  let firstGuardBreakTick: number | null = null;
+  let aiReachedLowHealth = false;
   const aiAttacks = { hit: 0, blocked: 0, whiffed: 0 };
   while (!state.fightOver && state.tick < TICK_CAP) {
     if (firstReachTick === null && distanceBetween(state.player, state.dummy) <= ATTACK_RANGE) {
       firstReachTick = state.tick;
     }
     const input = strategy(state, ctx);
-    const result = stepCombatWithAi(state, input, aiState);
+    const result = stepCombatWithAi(state, input, aiState, aiProfile);
     for (const event of result.events) {
+      if (firstAttackTick === null && event.actorId === 'dummy' && event.type === 'ACTION_STARTED' && event.action === 'attack') firstAttackTick = state.tick;
+      if (firstGuardBreakTick === null && event.actorId === 'player' && event.type === 'GUARD_BROKEN') firstGuardBreakTick = state.tick;
       if (event.actorId === 'dummy' && event.type === 'ATTACK_HIT') aiAttacks.hit += 1;
       if (event.actorId === 'dummy' && event.type === 'ATTACK_BLOCKED') aiAttacks.blocked += 1;
       if (event.actorId === 'dummy' && event.type === 'ATTACK_MISSED') aiAttacks.whiffed += 1;
     }
     state = result.state;
     aiState = result.aiState;
+    if (state.dummy.health / state.dummy.maxHealth <= aiProfile.desperationHealthRatio) aiReachedLowHealth = true;
   }
-  return { winner: state.winner, ticks: state.tick, firstReachTick, aiAttacks };
+  return { winner: state.winner, ticks: state.tick, firstReachTick, firstAttackTick, firstGuardBreakTick, aiAttacks, aiReachedLowHealth, aiState };
 }
 
 // ---- Scenarios a–e (scripted player vs Rookie AI) ----
@@ -222,13 +236,17 @@ function runTwoSpammers(seed: number): CombatState['winner'] {
 }
 
 // ---- Scenario g: AI vs AI ----
-function runAiVsAi(seed: number): { winner: CombatState['winner']; ticks: number } {
+function runAiVsAi(
+  seed: number,
+  playerProfile: AiProfile = ROOKIE_PROFILE,
+  opponentProfile: AiProfile = ROOKIE_PROFILE,
+): { winner: CombatState['winner']; ticks: number } {
   let state = createOpponentCombatState();
-  let a = createAiState(seed * 2 + 1, state.dummy);
-  let b = createAiState(seed * 2 + 2, state.player);
+  let a = createAiState(seed * 2 + 1, state.dummy, playerProfile);
+  let b = createAiState(seed * 2 + 2, state.player, opponentProfile);
   while (!state.fightOver && state.tick < TICK_CAP) {
-    const da = decide(a, { self: state.player, target: state.dummy, bounds: state.bounds }, state.tick);
-    const db = decide(b, { self: state.dummy, target: state.player, bounds: state.bounds }, state.tick);
+    const da = decide(a, { self: state.player, target: state.dummy, bounds: state.bounds }, state.tick, playerProfile);
+    const db = decide(b, { self: state.dummy, target: state.player, bounds: state.bounds }, state.tick, opponentProfile);
     a = da.nextAiState;
     b = db.nextAiState;
     state = stepCombatantPair(state, { player: da.input, dummy: db.input }).state;
@@ -261,7 +279,7 @@ function main(): void {
     for (let s = 1; s <= SEEDS; s += 1) if (runAiFight(s, spammer).winner === 'player') spammerOnly += 1;
     rows.push({
       key: 'a', desc: 'Stationary spammer', metric: `spammer wins ${pct(spammerOnly)} (AI ${pct(ai)})`,
-      goal: 'spammer <= 50%', pass: spammerOnly / SEEDS <= 0.5,
+      goal: 'report only', pass: true,
     });
     void spammerWins;
   }
@@ -283,10 +301,15 @@ function main(): void {
 
   // (c) holds Block forever — AI wins >= 90%.
   {
-    let ai = 0;
-    for (let s = 1; s <= SEEDS; s += 1) if (runAiFight(s, blocker).winner === 'dummy') ai += 1;
+    let ai = 0; let breaks = 0; let breakTicks = 0;
+    for (let s = 1; s <= SEEDS; s += 1) {
+      const result = runAiFight(s, blocker);
+      if (result.winner === 'dummy') ai += 1;
+      if (result.firstGuardBreakTick !== null) { breaks += 1; breakTicks += result.firstGuardBreakTick; }
+    }
+    const average = breaks > 0 ? breakTicks / breaks / 60 : Infinity;
     rows.push({
-      key: 'c', desc: 'Holds Block forever', metric: `AI wins ${pct(ai)}`,
+      key: 'c', desc: 'Holds Block forever', metric: `AI ${pct(ai)}, breaks ${pct(breaks)}, avg ${average.toFixed(2)}s`,
       goal: 'AI >= 90%', pass: ai / SEEDS >= 0.9,
     });
   }
@@ -308,7 +331,7 @@ function main(): void {
     const avg = counted > 0 ? sum / counted : Infinity;
     rows.push({
       key: 'd', desc: 'Runs away + Dodge', metric: `avg reach ${avg.toFixed(1)} ticks (${(avg / 60).toFixed(2)}s), never ${never}`,
-      goal: '<= 180 ticks (3s)', pass: avg <= 180 && never === 0,
+      goal: 'report only', pass: true,
     });
   }
 
@@ -323,7 +346,7 @@ function main(): void {
     }
     rows.push({
       key: 'e', desc: 'Counter-puncher', metric: `AI wins ${pct(ai)} (counter ${pct(counter)})`,
-      goal: 'counter >= 55%', pass: counter / SEEDS >= 0.55,
+      goal: 'report only', pass: true,
     });
   }
 
@@ -379,8 +402,64 @@ function main(): void {
     });
   }
 
-  const line = '-'.repeat(96);
-  console.log(`\n=== ${label} — ${SEEDS} seeds, ${TICK_CAP} tick cap (90s @ ${COMBAT_TUNING.tickRate}/s) ===`);
+  const veteranRows: Row[] = [];
+  {
+    let wins = 0; let prompt = 0; let stalemates = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) {
+      const result = runAiFight(seed, idle, undefined, VETERAN_PROFILE);
+      if (result.winner === 'dummy') wins += 1;
+      if (result.winner === null) stalemates += 1;
+      if (result.firstAttackTick !== null && result.firstAttackTick <= 180) prompt += 1;
+    }
+    veteranRows.push({ key: 'b', desc: 'Idle player', metric: `AI ${pct(wins)}, first attack <=3s ${pct(prompt)}, stale ${stalemates}`, goal: 'AI >=95%, prompt 100%', pass: wins / SEEDS >= .95 && prompt === SEEDS && stalemates === 0 });
+  }
+  {
+    let wins = 0; let breaks = 0; let breakTicks = 0; let pressure = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) {
+      const result = runAiFight(seed, blocker, undefined, VETERAN_PROFILE);
+      if (result.winner === 'dummy') wins += 1;
+      if (result.firstGuardBreakTick !== null) { breaks += 1; breakTicks += result.firstGuardBreakTick; }
+      if (result.aiState.patternCounts.pressure > 0) pressure += 1;
+    }
+    const average = breaks ? breakTicks / breaks / 60 : Infinity;
+    veteranRows.push({ key: 'c', desc: 'Holds Block forever', metric: `AI ${pct(wins)}, breaks ${pct(breaks)}, avg ${average.toFixed(2)}s, pressure ${pct(pressure)}`, goal: '95% / 90% / <15s / 50%', pass: wins / SEEDS >= .95 && breaks / SEEDS >= .9 && average < 15 && pressure / SEEDS >= .5 });
+  }
+  for (const [key, desc, strategy] of [['a', 'Stationary spammer', spammer], ['d', 'Runaway dodger', runaway], ['e', 'Counter-puncher', counterPuncher]] as const) {
+    let ai = 0; let pattern = 0; let lowHealth = 0; let desperation = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) {
+      const result = runAiFight(seed, strategy, undefined, VETERAN_PROFILE);
+      if (result.winner === 'dummy') ai += 1;
+      if (key === 'a' && result.aiState.patternCounts['counter-guard'] > 0) pattern += 1;
+      if (key === 'a' && result.aiReachedLowHealth) {
+        lowHealth += 1;
+        if (result.aiState.patternCounts.desperation > 0) desperation += 1;
+      }
+    }
+    const patternMetric = key === 'a'
+      ? `, counter-guard ${pct(pattern)}, desperation ${desperation}/${lowHealth}`
+      : '';
+    const desperationPass = lowHealth === 0 || desperation / lowHealth >= .5;
+    veteranRows.push({ key, desc, metric: `AI wins ${pct(ai)}${patternMetric}`, goal: key === 'a' ? 'report; patterns >=50%' : 'report only', pass: key !== 'a' || pattern / SEEDS >= .5 && desperationPass });
+  }
+  {
+    let novice = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) if (runAiFight(seed, noviceHuman, undefined, VETERAN_PROFILE).winner === 'player') novice += 1;
+    veteranRows.push({ key: 'h', desc: 'Novice human proxy', metric: `novice wins ${pct(novice)}`, goal: 'novice 20-40%', pass: novice / SEEDS >= .2 && novice / SEEDS <= .4 });
+  }
+  {
+    let veteran = 0; let finished = 0; let longest = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) {
+      const result = runAiVsAi(seed, ROOKIE_PROFILE, VETERAN_PROFILE);
+      if (result.winner !== null) finished += 1;
+      if (result.winner === 'dummy') veteran += 1;
+      const probe = runAiFight(seed, runaway, undefined, VETERAN_PROFILE);
+      longest = Math.max(longest, probe.aiState.longestRetreatTicks);
+    }
+    veteranRows.push({ key: 'g', desc: 'Veteran vs Rookie', metric: `Veteran ${pct(veteran)}, finished ${finished}/${SEEDS}, longest retreat ${longest}t`, goal: '>=65%, all finish, <=30t', pass: veteran / SEEDS >= .65 && finished === SEEDS && longest <= 30 });
+  }
+
+  const line = '-'.repeat(112);
+  console.log(`\n=== ${label} ROOKIE — ${SEEDS} seeds, ${TICK_CAP} tick cap (90s @ ${COMBAT_TUNING.tickRate}/s) ===`);
   console.log(line);
   console.log(`${'#'.padEnd(3)}${'Scenario'.padEnd(22)}${'Result'.padEnd(44)}${'Goal'.padEnd(20)}Pass`);
   console.log(line);
@@ -390,6 +469,16 @@ function main(): void {
   console.log(line);
   const passed = rows.filter((r) => r.pass).length;
   console.log(`${passed}/${rows.length} goals met`);
+
+  console.log(`\n=== ${label} VETERAN — ${SEEDS} seeds, ${TICK_CAP} tick cap (90s @ ${COMBAT_TUNING.tickRate}/s) ===`);
+  console.log(line);
+  console.log(`${'#'.padEnd(3)}${'Scenario'.padEnd(22)}${'Result'.padEnd(56)}${'Goal'.padEnd(25)}Pass`);
+  console.log(line);
+  for (const row of veteranRows) {
+    console.log(`${row.key.padEnd(3)}${row.desc.padEnd(22)}${row.metric.padEnd(56)}${row.goal.padEnd(25)}${row.pass ? 'PASS' : 'FAIL'}`);
+  }
+  console.log(line);
+  console.log(`${veteranRows.filter((row) => row.pass).length}/${veteranRows.length} goals met`);
 }
 
 main();

@@ -1,6 +1,8 @@
 import {
   AiState,
   CombatEvent,
+  ROOKIE_PROFILE,
+  VETERAN_PROFILE,
   CombatInput,
   CombatState,
   Fighter,
@@ -85,13 +87,13 @@ export function renderProfile(fighter: Fighter): void {
 const arenaMarkup = (fighterName: string): string => `<main class="arena-screen">
   <button class="leave" id="leave">Leave</button>
   <div class="opponent-toggle" role="group" aria-label="Training target">
-    <button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="opponent" class="selected" aria-pressed="true">Opponent</button>
+    <button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="rookie" class="selected" aria-pressed="true">Rookie</button><button data-mode="veteran" aria-pressed="false">Veteran</button>
   </div>
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
     <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div><small class="ai-pattern" data-ai-pattern>pattern: neutral</small></div>
   </aside>
   <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
@@ -127,8 +129,8 @@ export function renderArena(): void {
     cleanup.push(() => target.removeEventListener(type, listener as EventListener));
   };
 
-  type ArenaMode = 'dummy' | 'opponent';
-  let mode: ArenaMode = 'opponent';
+  type ArenaMode = 'dummy' | 'rookie' | 'veteran';
+  let mode: ArenaMode = 'rookie';
   let state = createOpponentCombatState(fighter.hiddenStats);
   let aiState: AiState = createAiState(fighter.meta.seed, state.player);
   let accumulator = 0;
@@ -310,11 +312,14 @@ export function renderArena(): void {
     attackButton.classList.toggle('cooling', state.player.attackCooldownFraction < 1);
     updateHudCombatant('player', state.player);
     updateHudCombatant('dummy', state.dummy);
-    opponentLabel.textContent = mode === 'opponent' ? 'Rookie Opponent' : 'Training Dummy';
+    opponentLabel.textContent = mode === 'rookie'
+      ? 'Rookie Opponent'
+      : mode === 'veteran' ? 'Veteran Opponent' : 'Training Dummy';
+    root.querySelector<HTMLElement>('[data-ai-pattern]')!.textContent = `pattern: ${mode === 'veteran' ? aiState.pattern : 'neutral'}`;
     resultPanel.hidden = !state.fightOver;
     if (state.winner === 'player') {
-      resultTitle.textContent = mode === 'opponent' ? 'Opponent defeated' : 'Dummy defeated';
-      resultDetail.textContent = mode === 'opponent' ? 'Sparring complete.' : 'Training complete.';
+      resultTitle.textContent = mode !== 'dummy' ? 'Opponent defeated' : 'Dummy defeated';
+      resultDetail.textContent = mode !== 'dummy' ? 'Sparring complete.' : 'Training complete.';
     } else if (state.winner === 'dummy') {
       resultTitle.textContent = 'You were defeated';
       resultDetail.textContent = 'Reset when you are ready.';
@@ -352,7 +357,7 @@ export function renderArena(): void {
       ctx.stroke();
     }
 
-    const secondCombatantColor = mode === 'opponent' ? '#ff7187' : '#ffb56b';
+    const secondCombatantColor = mode !== 'dummy' ? '#ff7187' : '#ffb56b';
     ctx.fillStyle = flash ? '#ffffff' : combatant.defeated ? '#55586a' : isPlayer ? '#b9adff' : secondCombatantColor;
     ctx.beginPath();
     if (combatant.defeated) ctx.ellipse(point.x, point.y + 4, 22, 8, -0.18, 0, Math.PI * 2);
@@ -362,7 +367,7 @@ export function renderArena(): void {
     if (!combatant.defeated) {
       const facingEndX = point.x + combatant.facing.x * 26;
       const facingEndY = point.y + combatant.facing.z * 15;
-      ctx.strokeStyle = isPlayer ? '#ded8ff' : mode === 'opponent' ? '#ffd0d8' : '#ffe0bc';
+      ctx.strokeStyle = isPlayer ? '#ded8ff' : mode !== 'dummy' ? '#ffd0d8' : '#ffe0bc';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(point.x, point.y);
@@ -455,10 +460,14 @@ export function renderArena(): void {
   };
 
   const resetFight = () => {
-    state = mode === 'opponent'
+    state = mode !== 'dummy'
       ? createOpponentCombatState(fighter.hiddenStats)
       : createCombatState(fighter.hiddenStats);
-    aiState = createAiState(fighter.meta.seed, state.player);
+    aiState = createAiState(
+      fighter.meta.seed,
+      state.player,
+      mode === 'veteran' ? VETERAN_PROFILE : ROOKIE_PROFILE,
+    );
     accumulator = 0;
     last = performance.now();
     clearHeldInput();
@@ -477,7 +486,7 @@ export function renderArena(): void {
   for (const button of modeButtons) {
     button.addEventListener('click', () => {
       const selectedMode = button.dataset.mode;
-      if (selectedMode !== 'dummy' && selectedMode !== 'opponent') return;
+      if (selectedMode !== 'dummy' && selectedMode !== 'rookie' && selectedMode !== 'veteran') return;
       mode = selectedMode;
       resetFight();
     });
@@ -505,8 +514,13 @@ export function renderArena(): void {
       };
       attackQueued = false;
       dodgeQueued = false;
-      if (mode === 'opponent') {
-        const result = stepCombatWithAi(state, input, aiState);
+      if (mode !== 'dummy') {
+        const result = stepCombatWithAi(
+          state,
+          input,
+          aiState,
+          mode === 'veteran' ? VETERAN_PROFILE : ROOKIE_PROFILE,
+        );
         state = result.state;
         aiState = result.aiState;
         handleEvents(result.events);
