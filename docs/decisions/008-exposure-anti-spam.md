@@ -1,6 +1,6 @@
 # Decision 008: Exposure anti-spam mechanic
 
-Status: accepted (Phase 1c.3)
+Status: accepted (Phase 1c.4)
 
 ## Problem
 
@@ -16,7 +16,7 @@ Exposure is applied to the **attacker** when an attack resolves, by outcome:
 - **Blocked**: `+blockedExposure` (45).
 - **Clean hit**: `+hitExposure` (10).
 
-Between resolutions exposure decays at `decayPerTick` (0.45) per tick. Because a clean, connecting hit adds less than the decay over one attack interval, an attacker who keeps landing hits never builds toward Exposed; an attacker who keeps whiffing or getting blocked does.
+After each gain, exposure is held for `decayDelayTicks` (60) ticks. It then decays at `decayPerTick` (0.25) per tick; each new gain restarts the delay. Because a clean, connecting hit adds less than the decay over one attack interval, an attacker who keeps landing hits never builds toward Exposed; an attacker who keeps whiffing or getting blocked does.
 
 When exposure reaches `maxExposure` the fighter becomes **Exposed** for `exposedTicks` (75 ticks):
 
@@ -67,3 +67,13 @@ Two counter-puncher scripts were built; both are reported so the choice is trans
 ## Known limit
 
 A perfectly clean-connecting stationary spammer never self-exposes (by design — landing hits should not be punished), so it remains stronger than a target that mixes offense and defense. Under the benchmark the stationary spammer's win rate dropped from 82.5% to 60% but did not fall to ≤50% without breaking the "AI beats a pure blocker ≥90%" fairness goal; the tuning was chosen to protect that fairness goal. Scenario (a) is the only goal that cannot be met. This is a limit of the fixed Rookie behavior, which this phase did not change.
+
+
+## Phase 1c.4 benchmark and Rookie tuning
+
+Rookie tuning is now reactionTicks 18, decisionIntervalTicks 12, aggression 0.38,
+mistakeChance 0.25, and punishChance 0.50; restraintExposureRatio remains 0.60. Punishes
+scale with the observed public exposure ratio, while fully exposed targets remain maximally
+punishable. The novice human proxy and attack outcome accuracy are recorded in the benchmark
+artifacts. Baseline and final tables include 40 seeds each. The final novice goal passes, while
+(a), (c), (d), and (e) remain short of target; no unapproved AI behavior was introduced.

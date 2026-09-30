@@ -1,14 +1,21 @@
+=== BASELINE — Phase 1c.3 source, 40 seeds, 5400 tick cap (90s @ 60/s) ===
 
-=== BASELINE — 40 seeds, 5400 tick cap (90s @ 60/s) ===
-------------------------------------------------------------------------------------------------
-#  Scenario              Result                                      Goal                Pass
-------------------------------------------------------------------------------------------------
-a  Stationary spammer    spammer wins 82.5% (AI 7.5%)                spammer <= 50%      FAIL
-b  Idle player           AI wins 100.0%, draws 0, stalemates 0       AI >= 95%, 0 draw/stalePASS
-c  Holds Block forever   AI wins 100.0%                              AI >= 90%           PASS
-d  Runs away + Dodge     avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks (3s)   PASS
-e  Counter-puncher       AI wins 70.0% (counter 30.0%)               AI >= 55%           PASS
-f  Two spammers          player 37.5% / dummy 57.5% / draw 2         each 35–65%         PASS
-g  AI vs AI              finished 40/40, avg 384 ticks               no stalemate        PASS
-------------------------------------------------------------------------------------------------
-6/7 goals met
+This baseline adds Phase 1c.4's novice proxy and accuracy reporting to the unchanged
+1c.3 combat/profile source. Scenario (e) is reported in the original direction:
+the counter-puncher must win at least 55%.
+
+# Scenario              Result                                      Goal                         Pass
+a Stationary spammer    spammer 60.0% (AI 27.5%)                    spammer <= 50%               FAIL
+b Idle player            AI 100.0%, draws 0, stalemates 0            AI >= 95%, no draw/stale     PASS
+c Holds Block forever    AI 97.5%                                    AI >= 90%                    PASS
+d Runs away + Dodge      avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks                PASS
+e Counter-puncher        counter 10.0% / AI 90.0%                    counter >= 55%              FAIL
+h Novice human proxy     novice 17.5% / AI 82.5% / draws 0            novice 40–60%, AI whiff >=30% FAIL
+f Two spammers            player 37.5% / dummy 57.5% / draw 2         each 35–65%                 PASS
+g AI vs AI                finished 40/40, avg 406 ticks               no stalemate                 PASS
+
+Accuracy (AI attack outcomes; 40 seeds):
+- vs stationary spammer: hit 100.0%, blocked 0.0%, whiff 0.0%.
+- vs novice proxy: hit 92.8%, blocked 0.0%, whiff 7.2%.
+
+6/9 reported goals met (accuracy is report-only; h and e fail in baseline).

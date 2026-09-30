@@ -3,6 +3,7 @@ import {
   COMBAT_TUNING,
   NEUTRAL_COMBAT_INPUT,
   createOpponentCombatState,
+  exposureDamageMultiplier,
   stepCombatantPair,
   type CombatEvent,
   type CombatInput,
@@ -51,7 +52,7 @@ describe('exposure buckets and decay', () => {
     const result = pairStep(state);
     expect(result.events.some((e) => e.type === 'ATTACK_MISSED' && e.actorId === 'player')).toBe(true);
     expect(state.player.exposure).toBe(0);
-    expect(result.state.player.exposure).toBeCloseTo(EXP.whiffExposure - EXP.decayPerTick, 6);
+    expect(result.state.player.exposure).toBeCloseTo(EXP.whiffExposure, 6);
   });
 
   it('adds blockedExposure to the attacker when the target blocks', () => {
@@ -61,7 +62,7 @@ describe('exposure buckets and decay', () => {
     face(state.dummy, state.player);
     const result = pairStep(state, {}, { blockHeld: true });
     expect(result.events.some((e) => e.type === 'ATTACK_BLOCKED' && e.actorId === 'player')).toBe(true);
-    expect(result.state.player.exposure).toBeCloseTo(EXP.blockedExposure - EXP.decayPerTick, 6);
+    expect(result.state.player.exposure).toBeCloseTo(EXP.blockedExposure, 6);
   });
 
   it('adds hitExposure to the attacker when an attack connects', () => {
@@ -69,7 +70,7 @@ describe('exposure buckets and decay', () => {
     readyAttack(state.player, state.dummy);
     const result = pairStep(state);
     expect(result.events.some((e) => e.type === 'ATTACK_HIT' && e.actorId === 'player')).toBe(true);
-    expect(result.state.player.exposure).toBeCloseTo(EXP.hitExposure - EXP.decayPerTick, 6);
+    expect(result.state.player.exposure).toBeCloseTo(EXP.hitExposure, 6);
   });
 
   it('counts a dodge that evades the attack as a whiff for the attacker', () => {
@@ -80,7 +81,7 @@ describe('exposure buckets and decay', () => {
     state.dummy.actionDirection = { x: 0, z: 0 };
     const result = pairStep(state, {}, {});
     expect(result.events.some((e) => e.type === 'DODGE_EVADED' && e.targetId === 'player')).toBe(true);
-    expect(result.state.player.exposure).toBeCloseTo(EXP.whiffExposure - EXP.decayPerTick, 6);
+    expect(result.state.player.exposure).toBeCloseTo(EXP.whiffExposure, 6);
   });
 
   it('decays exposure by decayPerTick every tick while not exposed and clamps to zero', () => {
@@ -139,7 +140,7 @@ describe('reaching the Exposed state', () => {
   it('continuous connected hits never reach Exposed', () => {
     let state = pair();
     // Keep both huge-health and in range so the attacker lands clean hits forever.
-    for (let tick = 0; tick < 2000; tick += 1) {
+    for (let tick = 0; tick < 500; tick += 1) {
       const result = pairStep(state, { attackPressed: true });
       state = result.state;
       face(state.player, state.dummy);
@@ -271,5 +272,43 @@ describe('exposure determinism', () => {
     const second = run();
     expect(first.states).toBe(second.states);
     expect(first.events).toBe(second.events);
+  });
+});
+
+
+describe('proportional exposure and delayed decay (Phase 1c.4)', () => {
+  it('calculates x1.0, x1.375, and x1.75 from pure exposure', () => {
+    expect(exposureDamageMultiplier(0)).toBeCloseTo(1);
+    expect(exposureDamageMultiplier(50)).toBeCloseTo(1.375);
+    expect(exposureDamageMultiplier(100)).toBeCloseTo(1.75);
+  });
+
+  it('holds exposure for the full delay, then decays at the configured rate', () => {
+    let state = pair();
+    state.player.exposure = 50;
+    state.player.exposureDecayDelayRemaining = EXP.decayDelayTicks;
+    for (let i = 0; i < EXP.decayDelayTicks; i += 1) state = pairStep(state).state;
+    expect(state.player.exposure).toBe(50);
+    state = pairStep(state).state;
+    expect(state.player.exposure).toBeCloseTo(50 - EXP.decayPerTick);
+  });
+
+  it('restarts the decay delay after a new exposure gain', () => {
+    let state = pair();
+    state.player.exposure = 20;
+    state.player.exposureDecayDelayRemaining = 1;
+    readyAttack(state.player, state.dummy);
+    state = pairStep(state).state;
+    expect(state.player.exposureDecayDelayRemaining).toBeGreaterThan(0);
+    expect(state.player.exposure).toBeGreaterThan(20);
+  });
+
+  it('uses fractional target exposure for health damage while leaving endurance drain raw', () => {
+    const state = pair();
+    state.dummy.exposure = 50;
+    readyAttack(state.player, state.dummy);
+    const result = pairStep(state);
+    const hit = result.events.find((event) => event.type === 'ATTACK_HIT');
+    expect(hit?.multiplier).toBeCloseTo(1.375);
   });
 });

@@ -59,11 +59,11 @@ export interface AiProfile {
 }
 
 export const ROOKIE_PROFILE: Readonly<AiProfile> = {
-  reactionTicks: 12,
-  decisionIntervalTicks: 8,
-  aggression: 0.58,
+  reactionTicks: 18,
+  decisionIntervalTicks: 12,
+  aggression: 0.38,
   caution: 0.52,
-  mistakeChance: 0.14,
+  mistakeChance: 0.25,
   preferredRange: 1.65,
   rangeTolerance: 0.25,
   mistakeRangeMargin: 0.55,
@@ -87,7 +87,7 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   guardGapTicks: 20,
   guardReleaseObservations: 2,
   minEnduranceRatioToGuard: 0.25,
-  punishChance: 0.9,
+  punishChance: 0.5,
   restraintExposureRatio: 0.6,
   dashCloseDistance: 4.5,
   dashCloseChance: 0.45,
@@ -412,8 +412,15 @@ export function decide(
     && (self.stamina - COMBAT_TUNING.dodge.staminaCost) / self.maxStamina >= profile.dashMinStaminaRatio;
   const staminaRatioOkForDash = staminaRatio >= profile.dashMinStaminaRatio;
 
+  const observedExposureRatio = target.exposed
+    ? 1
+    : Math.max(0, Math.min(1, target.exposure / COMBAT_TUNING.exposure.maxExposure));
+  // Preserve the ordinary stagger/recovery punish while making a visibly exposed target more
+  // attractive in proportion to its public meter (including partial exposure).
+  const exposureScaledPunishChance = profile.punishChance
+    * (target.exposed || target.exposure > 0 ? observedExposureRatio : 1);
   if (!retreating && canAttackNow && observedPunishable && distance <= attackProfile.range
-    && punishRoll < profile.punishChance) {
+    && punishRoll < exposureScaledPunishChance) {
     input.attackPressed = true;
     reason = 'punish';
   } else if (!retreating && idle && observedStartup && defensiveRange && cautionRoll < profile.caution) {

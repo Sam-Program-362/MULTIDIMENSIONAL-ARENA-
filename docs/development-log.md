@@ -63,3 +63,18 @@ The Rookie gained two hooks that reuse existing behavior with no new movement, s
 The debug HUD gained an orange Exposure bar for both fighters (reading `EXPOSED` at maximum), and the canvas draws a red pulsing "guard down" ring plus a body tint on an Exposed fighter. The joystick, action buttons, and attack-cooldown visuals were untouched.
 
 A scripted seven-scenario benchmark (`scripts/benchmark.ts`, 40 seeds) was run before the change (baseline) and after (final). Exposure and the AI hooks moved the stationary-spammer win rate from 82.5% to 60% and the counter-puncher scenario from a loss to a 100% AI win; the idle-player, hold-block, gap-close, two-spammer, and AI-vs-AI goals all pass with no stalemates. The stationary-spammer goal of ≤50% was not reachable without dropping the "AI beats a pure blocker ≥90%" fairness goal — a limit of the fixed Rookie behavior — so tuning was chosen to protect fairness (documented in decision 008). Vitest grew to 131 tests (16 new exposure tests, 5 new AI exposure-hook tests, and the two Phase 1c.2 engagement-cycle AI tests removed with the revert), all run without a browser. The save schema stays at version 1 and combat state is still session-only. Spacing/engagement AI, adaptive AI, feints, parry/perfect block, heavy attacks, and weapons remain planned only.
+
+
+## 2026-09-30 — Phase 1c.4 — proportional Exposure and Rookie benchmark
+
+Reworked Exposure into a shared proportional health-damage multiplier: x1.0 at zero, x1.375
+at half, and x1.75 at the cap. Exposure now waits 60 ticks after its last gain and then drains
+at 0.25 per tick; Exposed behavior, guard gating, duration, and reset remain unchanged. Added a
+pure multiplier helper and live x1.x labels beside both orange HUD bars. Rookie profile values
+were tuned within the requested ranges and punish selection uses the delayed observed exposure
+ratio. Added the novice-human benchmark proxy and AI hit/blocked/whiff metrics.
+
+The final novice result is 50.0% wins with 38.9% AI whiffs, meeting that acceptance target.
+The stationary spammer, permanent blocker, runaway timing, and original-direction counter goal
+remain misses under the fixed behavior; these are documented honestly in benchmark-final.txt.
+Spacing/engagement AI, adaptive AI, feints, and parry remain planned only.

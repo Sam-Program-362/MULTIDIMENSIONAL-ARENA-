@@ -77,20 +77,20 @@ export const COMBAT_TUNING = {
    */
   exposure: {
     maxExposure: 100,
-    // NOTE: the anti-spam design (docs/decisions/008) shipped with these values TUNED up from the
-    // spec defaults (whiff 30 / blocked 20 / hit 8 / exposedTicks 60). See 008 and the benchmark
-    // report for the reasoning. hitExposure MUST stay below decayPerTick * attack.minIntervalTicks
-    // (0.45 * 28 = 12.6) so a clean, always-connecting attacker never becomes Exposed.
     /** Attack finished or evaded (including a target's dodge i-frames) without connecting. */
     whiffExposure: 45,
     /** Attack was blocked by the target. */
-    blockedExposure: 45,
-    /** Attack connected (kept below the decay-per-interval so pure clean hits never expose). */
-    hitExposure: 10,
-    /** Continuous decay every tick while NOT exposed. */
-    decayPerTick: 0.45,
+    blockedExposure: 40,
+    /** Attack connected. */
+    hitExposure: 5,
+    /** Exposure starts decaying only after this many ticks without a gain. */
+    decayDelayTicks: 60,
+    /** Continuous decay after the delay while NOT exposed. */
+    decayPerTick: 0.25,
     exposedTicks: 75,
-    /** Health-damage multiplier applied to hits landed on an Exposed target. */
+    /** Maximum health-damage bonus at full exposure (1 + this value = 1.75). */
+    exposureDamageBonus: 0.75,
+    /** Compatibility alias for consumers of the threshold-era tuning name. */
     exposedDamageMultiplier: 1.75,
     /** Exposure is set to maxExposure * this ratio when the Exposed duration ends. */
     exposedResetRatio: 0.25,
@@ -186,6 +186,8 @@ export interface CombatantState {
   exposed: boolean;
   /** Ticks left in the current Exposed period (0 when not exposed). */
   exposedTicksRemaining: number;
+  /** Ticks remaining before exposure may start decaying after its latest gain. */
+  exposureDecayDelayRemaining: number;
   /** Which attack profile this combatant swings. Weapons will set this later. */
   attackProfileId: AttackProfileId;
   /** Ticks until another attack may start (start-to-start minimum interval). */
@@ -315,6 +317,7 @@ export function createCombatantState(
     maxExposure: COMBAT_TUNING.exposure.maxExposure,
     exposed: false,
     exposedTicksRemaining: 0,
+    exposureDecayDelayRemaining: 0,
     attackProfileId: 'basic',
     attackCooldownRemaining: 0,
     attackCooldownFraction: 1,
@@ -610,6 +613,7 @@ function applyAttackerExposure(
       ? exposure.blockedExposure
       : exposure.hitExposure;
   attacker.exposure = Math.min(attacker.maxExposure, attacker.exposure + amount);
+  attacker.exposureDecayDelayRemaining = COMBAT_TUNING.exposure.decayDelayTicks;
   if (!attacker.exposed && attacker.exposure >= attacker.maxExposure) {
     attacker.exposed = true;
     attacker.exposedTicksRemaining = exposure.exposedTicks;
@@ -620,6 +624,12 @@ function applyAttackerExposure(
     }
     events.push({ type: 'EXPOSED_STARTED', tick, actorId: attacker.id, remaining: exposure.exposedTicks });
   }
+}
+
+/** Pure health-damage multiplier for a target's exposure at hit time. */
+export function exposureDamageMultiplier(exposure: number, maxExposure: number = COMBAT_TUNING.exposure.maxExposure): number {
+  const ratio = maxExposure > 0 ? Math.max(0, Math.min(1, exposure / maxExposure)) : 0;
+  return 1 + COMBAT_TUNING.exposure.exposureDamageBonus * ratio;
 }
 
 function applyDamage(attacker: CombatantState, target: CombatantState, amount: number, events: CombatEvent[], tick: number, multiplier = 1): void {
@@ -692,7 +702,7 @@ function resolveAttack(attacker: CombatantState, target: CombatantState, events:
       breakGuard(target, events, tick, attacker, Math.min(drain, target.endurance));
     }
     // Exposed targets take multiplied HEALTH damage only; endurance/guard-break rules are unchanged.
-    const multiplier = target.exposed ? COMBAT_TUNING.exposure.exposedDamageMultiplier : 1;
+    const multiplier = exposureDamageMultiplier(target.exposure, target.maxExposure);
     const finalDamage = baseDamage * multiplier;
     events.push({ type: 'ATTACK_HIT', tick, actorId: attacker.id, targetId: target.id, amount: finalDamage, multiplier });
     applyDamage(attacker, target, finalDamage, events, tick, multiplier);
@@ -805,6 +815,10 @@ function updateExposure(actor: CombatantState, events: CombatEvent[], tick: numb
       actor.exposure = actor.maxExposure * COMBAT_TUNING.exposure.exposedResetRatio;
       events.push({ type: 'EXPOSED_ENDED', tick, actorId: actor.id, remaining: actor.exposure });
     }
+    return;
+  }
+  if (actor.exposureDecayDelayRemaining > 0) {
+    actor.exposureDecayDelayRemaining -= 1;
     return;
   }
   actor.exposure = Math.max(0, actor.exposure - COMBAT_TUNING.exposure.decayPerTick);
