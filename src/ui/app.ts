@@ -10,6 +10,7 @@ import {
   createFighter,
   createOpponentCombatState,
   describeCondition,
+  exposureDamageMultiplier,
   joystickInput,
   joystickKnobOffset,
   stepCombat,
@@ -89,8 +90,8 @@ const arenaMarkup = (fighterName: string): string => `<main class="arena-screen"
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
-    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span data-value="exposure"></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span data-value="exposure"></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
+    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
   </aside>
   <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
@@ -298,6 +299,7 @@ export function renderArena(): void {
     hud.querySelector<HTMLElement>('[data-value="exposure"]')!.textContent = combatant.exposed
       ? 'EXPOSED'
       : `${Math.round(combatant.exposure)} / ${combatant.maxExposure}`;
+    hud.querySelector<HTMLElement>('[data-value="exposure-multiplier"]')!.textContent = `x${exposureDamageMultiplier(combatant.exposure, combatant.maxExposure).toFixed(1)}`;
     hud.classList.toggle('exposed', combatant.exposed);
     hud.classList.toggle('guard-broken', combatant.guardBroken);
     hud.classList.toggle('defeated', combatant.defeated);
