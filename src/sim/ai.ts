@@ -46,8 +46,13 @@ export interface AiProfile {
   guardReleaseObservations: number;
   /** Below this endurance ratio the AI stops choosing to guard. */
   minEnduranceRatioToGuard: number;
-  /** Attack chance against an observed staggered / recovering target in range. */
+  /** Attack chance against an observed staggered / recovering / Exposed target in range. */
   punishChance: number;
+  /**
+   * At or above this ratio of its OWN exposure, the AI stops starting ordinary attacks (it may
+   * still punish, guard, retreat, or dodge). A profile value, not a hard rule.
+   */
+  restraintExposureRatio: number;
   dashCloseDistance: number;
   dashCloseChance: number;
   dashMinStaminaRatio: number;
@@ -82,7 +87,8 @@ export const ROOKIE_PROFILE: Readonly<AiProfile> = {
   guardGapTicks: 20,
   guardReleaseObservations: 2,
   minEnduranceRatioToGuard: 0.25,
-  punishChance: 0.85,
+  punishChance: 0.9,
+  restraintExposureRatio: 0.6,
   dashCloseDistance: 4.5,
   dashCloseChance: 0.45,
   dashMinStaminaRatio: 0.35,
@@ -97,6 +103,9 @@ export interface AiTargetSnapshot {
   currentAction: { type: ActionType; phase: ActionPhase };
   actionTick: number;
   staminaBand: StaminaBand;
+  /** Public exposure state; delayed with the rest of the snapshot. */
+  exposed: boolean;
+  exposure: number;
   defeated: boolean;
 }
 
@@ -163,6 +172,8 @@ const neutralSnapshot = (): AiTargetSnapshot => ({
   currentAction: { type: 'idle', phase: 'idle' },
   actionTick: 0,
   staminaBand: 'ok',
+  exposed: false,
+  exposure: 0,
   defeated: false,
 });
 
@@ -173,6 +184,8 @@ function targetSnapshot(target: CombatantState): AiTargetSnapshot {
     currentAction: { ...target.currentAction },
     actionTick: target.actionTick,
     staminaBand: target.stamina / target.maxStamina <= COMBAT_TUNING.lowStaminaThreshold ? 'low' : 'ok',
+    exposed: target.exposed,
+    exposure: target.exposure,
     defeated: target.defeated,
   };
 }
@@ -386,9 +399,15 @@ export function decide(
   const defensiveRange = distance <= threatRange;
   const enduranceRatio = self.maxEndurance > 0 ? self.endurance / self.maxEndurance : 0;
   // Punishable states, as seen through the reaction delay: never current-tick knowledge.
-  const observedPunishable = target.currentAction.type === 'stagger'
+  // An observed Exposed target is treated exactly like an observed staggered one.
+  const observedPunishable = target.exposed
+    || target.currentAction.type === 'stagger'
     || (target.currentAction.type === 'attack' && target.currentAction.phase === 'recovery')
     || (target.currentAction.type === 'dodge' && target.currentAction.phase === 'recovery');
+  // Restraint: at/above its own exposure ratio the AI stops STARTING ordinary attacks. Punishing,
+  // guarding, retreating and dodging stay available.
+  const selfExposureRatio = self.maxExposure > 0 ? self.exposure / self.maxExposure : 0;
+  const restrained = selfExposureRatio >= profile.restraintExposureRatio;
   const dashLeavesEnoughStamina = self.maxStamina > 0
     && (self.stamina - COMBAT_TUNING.dodge.staminaCost) / self.maxStamina >= profile.dashMinStaminaRatio;
   const staminaRatioOkForDash = staminaRatio >= profile.dashMinStaminaRatio;
@@ -449,7 +468,7 @@ export function decide(
     input.dodgePressed = true;
     heldMovement = steerInsideBounds(toward, self, observation.bounds, profile.wallBuffer);
     reason = 'dash-close';
-  } else if (!retreating && idle && enoughToAttack) {
+  } else if (!retreating && idle && enoughToAttack && !restrained) {
     // 1c.3 fix: only press Attack when the shared attack cooldown is ready, or close enough
     // that the input buffer keeps the press alive until it clears. Prevents dead presses that
     // the old build wasted while on cooldown.
@@ -468,6 +487,7 @@ export function decide(
     }
   } else if (
     !retreating
+    && !restrained
     && self.currentAction.type === 'attack'
     && self.currentAction.phase === 'recovery'
     && enoughToAttack

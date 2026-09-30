@@ -1,7 +1,7 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b fixed-timestep movement and tuned deterministic combat basics, and Phase 1c's first seeded Rookie opponent are implemented. Phase 1c.1 added endurance (the guard resource), guard breaks, a per-attack minimum interval, and AI guard/punish/dash behavior. Phase 1c.2 adds block auto-facing, empty delayed guard recovery, the 28-tick interval, and an edge-distance Rookie engagement cycle. Stamina pays for attacks and dodges; endurance absorbs blocked hits and breaks the guard when it empties. The current session-only training fight can switch between a stationary dummy and a delayed-observation, non-frame-perfect opponent; both use the same attack/block/dodge rules and debug HUD.
+- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b fixed-timestep movement and tuned deterministic combat basics, and Phase 1c's first seeded Rookie opponent are implemented. Phase 1c.1 added endurance (the guard resource), guard breaks, a per-attack minimum interval, and AI guard/punish/dash behavior. Phase 1c.2 added block auto-facing, empty delayed guard recovery, and the 28-tick interval. Phase 1c.3 adds the Exposure anti-spam meter (whiffed/blocked swings build exposure, clean hits barely do, and at full exposure the guard drops and damage taken is ×1.75) with Rookie punish/restraint hooks, and reverted the Rookie to the 1c.1 approach/hold/punish/dash controller while keeping the 1c.2 combat rules. Stamina pays for attacks and dodges; endurance absorbs blocked hits and breaks the guard when it empties; exposure penalizes repeated non-connecting offense. The current session-only training fight can switch between a stationary dummy and a delayed-observation, non-frame-perfect opponent; both use the same attack/block/dodge rules and debug HUD.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)
@@ -19,7 +19,9 @@
 
 ## Planned future ideas — not built
 
+- Spacing / engagement-cycle AI (edge-distance baiting, plans) — prototyped in 1c.2 and removed in 1c.3.
 - Adaptive AI and behavior based on personalities/traits.
+- Feints.
 - Multiple simultaneous opponents.
 - Fight rewards or progression consequences.
 - A Heavy attack button.

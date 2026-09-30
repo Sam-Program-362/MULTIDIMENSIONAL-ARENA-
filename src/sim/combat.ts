@@ -69,6 +69,32 @@ export const COMBAT_TUNING = {
     guardBreakStaggerTicks: 40,
     guardBreakResetRatio: 0,
   },
+  /**
+   * Exposure: a shared anti-spam rule applied to the ATTACKER when its attack resolves. Reckless
+   * offense (whiffs, blocked swings) builds it fast; landing hits builds it slowly. At the cap the
+   * combatant is Exposed: it cannot block and takes extra health damage for a fixed duration. This is
+   * public state (shown in the HUD, read by the AI through the same delayed observation).
+   */
+  exposure: {
+    maxExposure: 100,
+    // NOTE: the anti-spam design (docs/decisions/008) shipped with these values TUNED up from the
+    // spec defaults (whiff 30 / blocked 20 / hit 8 / exposedTicks 60). See 008 and the benchmark
+    // report for the reasoning. hitExposure MUST stay below decayPerTick * attack.minIntervalTicks
+    // (0.45 * 28 = 12.6) so a clean, always-connecting attacker never becomes Exposed.
+    /** Attack finished or evaded (including a target's dodge i-frames) without connecting. */
+    whiffExposure: 45,
+    /** Attack was blocked by the target. */
+    blockedExposure: 45,
+    /** Attack connected (kept below the decay-per-interval so pure clean hits never expose). */
+    hitExposure: 10,
+    /** Continuous decay every tick while NOT exposed. */
+    decayPerTick: 0.45,
+    exposedTicks: 75,
+    /** Health-damage multiplier applied to hits landed on an Exposed target. */
+    exposedDamageMultiplier: 1.75,
+    /** Exposure is set to maxExposure * this ratio when the Exposed duration ends. */
+    exposedResetRatio: 0.25,
+  },
   dodge: {
     startupTicks: 1,
     activeTicks: 7,
@@ -150,6 +176,16 @@ export interface CombatantState {
   enduranceRegenDelay: number;
   /** True from the guard-breaking hit until the stagger ends (UI + AI read it). */
   guardBroken: boolean;
+  /**
+   * Anti-spam exposure (0..maxExposure). Added to this combatant when ITS OWN attacks resolve;
+   * decays every tick while not exposed. Public state: shown in the HUD, read by the AI.
+   */
+  exposure: number;
+  maxExposure: number;
+  /** True while Exposed: block is disabled and incoming hits deal multiplied health damage. */
+  exposed: boolean;
+  /** Ticks left in the current Exposed period (0 when not exposed). */
+  exposedTicksRemaining: number;
   /** Which attack profile this combatant swings. Weapons will set this later. */
   attackProfileId: AttackProfileId;
   /** Ticks until another attack may start (start-to-start minimum interval). */
@@ -190,6 +226,8 @@ export type CombatEventType =
   | 'GUARD_BROKEN'
   | 'ENDURANCE_DEPLETED'
   | 'STAMINA_DEPLETED'
+  | 'EXPOSED_STARTED'
+  | 'EXPOSED_ENDED'
   | 'COMBATANT_DEFEATED';
 
 /** Plain-data event records can be logged, replayed, or rendered without simulation imports. */
@@ -203,6 +241,8 @@ export interface CombatEvent {
   remaining?: number;
   /** Endurance removed by a blocked hit (ATTACK_BLOCKED / GUARD_BROKEN). */
   enduranceDrained?: number;
+  /** Health-damage multiplier applied (ATTACK_HIT / DAMAGE_APPLIED). 1 unless the target was Exposed. */
+  multiplier?: number;
 }
 
 export interface CombatStepResult { state: CombatState; events: CombatEvent[]; }
@@ -271,6 +311,10 @@ export function createCombatantState(
     maxEndurance: vitals.maxEndurance,
     enduranceRegenDelay: 0,
     guardBroken: false,
+    exposure: 0,
+    maxExposure: COMBAT_TUNING.exposure.maxExposure,
+    exposed: false,
+    exposedTicksRemaining: 0,
     attackProfileId: 'basic',
     attackCooldownRemaining: 0,
     attackCooldownFraction: 1,
@@ -427,7 +471,8 @@ function startBufferedAction(
     spendStamina(actor, profile.staminaCost, events, tick);
     return;
   }
-  if (input.blockHeld && actor.stamina >= COMBAT_TUNING.block.minimumStartStamina) {
+  // Block cannot start while Exposed (guard down for the whole duration).
+  if (input.blockHeld && !actor.exposed && actor.stamina >= COMBAT_TUNING.block.minimumStartStamina) {
     setAction(actor, 'block', events, tick);
   }
 }
@@ -451,6 +496,11 @@ function phaseFor(actor: CombatantState): ActionPhase {
 }
 
 function prepareAction(actor: CombatantState, input: CombatInput): void {
+  // Guard down: an Exposed combatant cannot hold a block. Drop any block phase immediately.
+  if (actor.exposed && actor.currentAction.type === 'block') {
+    actor.currentAction = { type: 'idle', phase: 'idle' };
+    actor.actionTick = 0;
+  }
   if (actor.currentAction.type === 'block') {
     if (actor.currentAction.phase !== 'recovery' && !input.blockHeld) {
       actor.currentAction.phase = 'recovery';
@@ -543,9 +593,38 @@ function breakGuard(
   events.push({ type: 'BLOCK_BROKEN', tick, actorId: target.id, targetId: attacker.id });
 }
 
-function applyDamage(attacker: CombatantState, target: CombatantState, amount: number, events: CombatEvent[], tick: number): void {
+/**
+ * Add exposure to an ATTACKER when its attack resolves and cross into the Exposed state at the cap.
+ * `kind` selects the shared tuning amount. Exposure is public and identical for player and AI.
+ */
+function applyAttackerExposure(
+  attacker: CombatantState,
+  kind: 'whiff' | 'blocked' | 'hit',
+  events: CombatEvent[],
+  tick: number,
+): void {
+  const exposure = COMBAT_TUNING.exposure;
+  const amount = kind === 'whiff'
+    ? exposure.whiffExposure
+    : kind === 'blocked'
+      ? exposure.blockedExposure
+      : exposure.hitExposure;
+  attacker.exposure = Math.min(attacker.maxExposure, attacker.exposure + amount);
+  if (!attacker.exposed && attacker.exposure >= attacker.maxExposure) {
+    attacker.exposed = true;
+    attacker.exposedTicksRemaining = exposure.exposedTicks;
+    // Guard down: a held block ends immediately and none can start during the exposed period.
+    if (attacker.currentAction.type === 'block') {
+      attacker.currentAction = { type: 'idle', phase: 'idle' };
+      attacker.actionTick = 0;
+    }
+    events.push({ type: 'EXPOSED_STARTED', tick, actorId: attacker.id, remaining: exposure.exposedTicks });
+  }
+}
+
+function applyDamage(attacker: CombatantState, target: CombatantState, amount: number, events: CombatEvent[], tick: number, multiplier = 1): void {
   target.health = Math.max(0, target.health - amount);
-  events.push({ type: 'DAMAGE_APPLIED', tick, actorId: attacker.id, targetId: target.id, amount, remaining: target.health });
+  events.push({ type: 'DAMAGE_APPLIED', tick, actorId: attacker.id, targetId: target.id, amount, remaining: target.health, multiplier });
   if (target.health === 0 && !target.defeated) {
     target.defeated = true;
     // Action cleanup is deferred until both already-committed attacks resolve. That makes a
@@ -576,6 +655,8 @@ function resolveAttack(attacker: CombatantState, target: CombatantState, events:
     attacker.attackConnected = true;
     if (target.invulnerable) {
       events.push({ type: 'DODGE_EVADED', tick, actorId: target.id, targetId: attacker.id });
+      // Evaded by dodge i-frames: counts as a whiff for the attacker.
+      applyAttackerExposure(attacker, 'whiff', events, tick);
       return;
     }
 
@@ -604,18 +685,27 @@ function resolveAttack(attacker: CombatantState, target: CombatantState, events:
           enduranceDrained: drain,
         });
         if (chip > 0) applyDamage(attacker, target, chip, events, tick);
+        // A blocked swing builds the attacker's exposure.
+        applyAttackerExposure(attacker, 'blocked', events, tick);
         return;
       }
       breakGuard(target, events, tick, attacker, Math.min(drain, target.endurance));
     }
-    events.push({ type: 'ATTACK_HIT', tick, actorId: attacker.id, targetId: target.id, amount: baseDamage });
-    applyDamage(attacker, target, baseDamage, events, tick);
+    // Exposed targets take multiplied HEALTH damage only; endurance/guard-break rules are unchanged.
+    const multiplier = target.exposed ? COMBAT_TUNING.exposure.exposedDamageMultiplier : 1;
+    const finalDamage = baseDamage * multiplier;
+    events.push({ type: 'ATTACK_HIT', tick, actorId: attacker.id, targetId: target.id, amount: finalDamage, multiplier });
+    applyDamage(attacker, target, finalDamage, events, tick, multiplier);
+    // A connected hit builds the attacker's exposure slowly.
+    applyAttackerExposure(attacker, 'hit', events, tick);
     return;
   }
 
   const finalActiveTick = profile.startupTicks + profile.activeTicks - 1;
   if (attacker.actionTick === finalActiveTick) {
     events.push({ type: 'ATTACK_MISSED', tick, actorId: attacker.id, targetId: target.id });
+    // The active phase ended without connecting: a whiff.
+    applyAttackerExposure(attacker, 'whiff', events, tick);
   }
 }
 
@@ -701,6 +791,25 @@ function regenerateEndurance(actor: CombatantState): void {
   );
 }
 
+/**
+ * Exposure lifecycle each tick. While Exposed, count the timer down and reset exposure to a
+ * fraction of max when it ends; otherwise decay exposure continuously. Public and shared.
+ */
+function updateExposure(actor: CombatantState, events: CombatEvent[], tick: number): void {
+  if (actor.defeated) return;
+  if (actor.exposed) {
+    actor.exposedTicksRemaining -= 1;
+    if (actor.exposedTicksRemaining <= 0) {
+      actor.exposed = false;
+      actor.exposedTicksRemaining = 0;
+      actor.exposure = actor.maxExposure * COMBAT_TUNING.exposure.exposedResetRatio;
+      events.push({ type: 'EXPOSED_ENDED', tick, actorId: actor.id, remaining: actor.exposure });
+    }
+    return;
+  }
+  actor.exposure = Math.max(0, actor.exposure - COMBAT_TUNING.exposure.decayPerTick);
+}
+
 function tickAttackCooldown(actor: CombatantState): void {
   const interval = Math.max(0, attackProfileOf(actor).minIntervalTicks);
   actor.attackCooldownRemaining = Math.max(0, actor.attackCooldownRemaining - 1);
@@ -773,6 +882,7 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
     finishOrAdvanceAction(actor);
     regenerateStamina(actor, actionThisTick);
     regenerateEndurance(actor);
+    updateExposure(actor, events, next.tick);
     tickAttackCooldown(actor);
     decrementBuffers(actor);
   }

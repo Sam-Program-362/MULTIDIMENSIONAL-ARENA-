@@ -89,8 +89,8 @@ const arenaMarkup = (fighterName: string): string => `<main class="arena-screen"
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
-    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div></div>
+    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span data-value="exposure"></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span data-value="exposure"></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
   </aside>
   <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
@@ -293,6 +293,12 @@ export function renderArena(): void {
     hud.querySelector<HTMLElement>('[data-value="stamina"]')!.textContent = `${Math.ceil(combatant.stamina)} / ${combatant.maxStamina}`;
     hud.querySelector<HTMLElement>('[data-bar="endurance"]')!.style.width = `${endurancePercent}%`;
     hud.querySelector<HTMLElement>('[data-value="endurance"]')!.textContent = `${Math.ceil(combatant.endurance)} / ${combatant.maxEndurance}`;
+    const exposurePercent = (combatant.exposure / combatant.maxExposure) * 100;
+    hud.querySelector<HTMLElement>('[data-bar="exposure"]')!.style.width = `${exposurePercent}%`;
+    hud.querySelector<HTMLElement>('[data-value="exposure"]')!.textContent = combatant.exposed
+      ? 'EXPOSED'
+      : `${Math.round(combatant.exposure)} / ${combatant.maxExposure}`;
+    hud.classList.toggle('exposed', combatant.exposed);
     hud.classList.toggle('guard-broken', combatant.guardBroken);
     hud.classList.toggle('defeated', combatant.defeated);
   };
@@ -393,6 +399,21 @@ export function renderArena(): void {
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.arc(point.x + wobble, point.y, 27, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Exposed: guard is down. A red pulsing ring plus a red body tint reads at a glance.
+    if (combatant.exposed && !combatant.defeated) {
+      const bodyRadius = isPlayer ? 13 : 15;
+      const pulse = 0.5 + 0.5 * Math.sin(state.tick * 0.4);
+      ctx.fillStyle = `rgba(255, 74, 60, ${0.18 + 0.12 * pulse})`;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, bodyRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(255, 74, 60, ${0.55 + 0.45 * pulse})`;
+      ctx.lineWidth = 3 + 2 * pulse;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, bodyRadius + 12 + 2 * pulse, 0, Math.PI * 2);
       ctx.stroke();
     }
 
