@@ -1,14 +1,62 @@
+=== FINAL BENCHMARK — 40 seeds, 5400 tick cap (90s @ 60 t/s) ===
+Game rules and tuning are the shipped Phase 1c.3 source (exposure active). No
+rules or tuning were changed to produce this report.
 
-=== FINAL — 40 seeds, 5400 tick cap (90s @ 60/s) ===
+Scenario (e) is reported in the ORIGINAL task direction: the goal is that a
+scripted SKILLED COUNTER-PUNCHER wins at least 55% of its fights AGAINST the AI
+(counter-puncher win rate >= 55%), NOT the AI. Two counter-puncher scripts were
+built during development; both are reported side by side below. (The committed
+harness scripts/benchmark.ts prints the same fight from the AI's side, i.e.
+AI% = 100 - counter% here since there were no draws; only the reported
+direction differs, not the fights.)
+
 ------------------------------------------------------------------------------------------------
-#  Scenario              Result                                      Goal                Pass
+#  Scenario              Result                                      Goal (original)     Met?
 ------------------------------------------------------------------------------------------------
-a  Stationary spammer    spammer wins 60.0% (AI 27.5%)               spammer <= 50%      FAIL
-b  Idle player           AI wins 100.0%, draws 0, stalemates 0       AI >= 95%, 0 draw/stalePASS
-c  Holds Block forever   AI wins 97.5%                               AI >= 90%           PASS
-d  Runs away + Dodge     avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks (3s)   PASS
-e  Counter-puncher       AI wins 75.0% (counter 25.0%)               AI >= 55%           PASS
-f  Two spammers          player 37.5% / dummy 57.5% / draw 2         each 35–65%         PASS
-g  AI vs AI              finished 40/40, avg 406 ticks               no stalemate        PASS
+a  Stationary spammer    spammer wins 60.0% (AI 27.5%)               spammer <= 50%      NO
+b  Idle player           AI wins 100.0%, draws 0, stalemates 0       AI >= 95%, 0 draw   YES
+c  Holds Block forever   AI wins 97.5%                               AI >= 90%           YES
+d  Runs away + Dodge     avg reach 172.1 ticks (2.87s), never 0      <= 180 ticks (3s)   YES
+e  Counter-puncher       see the two scripts below                   counter >= 55%      see below
+f  Two spammers          player 37.5% / dummy 57.5% / draw 2         each 35-65%         YES
+g  AI vs AI              finished 40/40, avg 406 ticks               no stalemate        YES
 ------------------------------------------------------------------------------------------------
-6/7 goals met
+
+Scenario (e) — counter-puncher, ORIGINAL wording (counter-puncher wins >= 55%):
+
+  (1) Competent turtle-and-punish script
+      Behavior: stays in range, keeps a standing guard by default, dodges to
+      protect endurance and to bait whiffs, and drops in to punish every
+      observed opening (recovery / stagger / Exposed AI), cashing the 1.75x
+      multiplier on an Exposed AI.
+      Result:  counter wins 100.0%  /  AI wins 0.0%  /  draws 0
+      Goal counter >= 55%:  MET
+
+  (2) guardBias 0.85 script (the later, deliberately weaker reactor)
+      Behavior: same punishing/dodging, but only holds its guard on ~85% of
+      no-read ticks (drops it the rest), so the AI's guard-break and Exposure
+      punishes get through.
+      Result:  counter wins 25.0%  /  AI wins 75.0%  /  draws 0
+      Goal counter >= 55%:  NOT MET
+
+------------------------------------------------------------------------------------------------
+Goals met under the ORIGINAL wording of every scenario:
+
+  With counter-puncher script (1) turtle-and-punish for (e):
+      met: b, c, d, e, f, g   ->  6 / 7   (only (a) not met)
+
+  With counter-puncher script (2) guardBias 0.85 for (e):
+      met: b, c, d, f, g      ->  5 / 7   (a) and (e) not met)
+------------------------------------------------------------------------------------------------
+
+Notes:
+- The original counter-puncher goal IS achievable: a competent, skilled
+  turtle-and-punish counter-puncher beats the AI 100% of the time (script 1).
+- The only scenario that cannot be met is (a): a cleanly connecting stationary
+  spammer never self-exposes (landing hits is not punished by design) and the
+  fixed Rookie attacks only ~5x per fight, so (a) floors at 60% (down from the
+  82.5% baseline). Lowering it further breaks the (c) >= 90% fairness goal, so
+  the tuning protects fairness. This is a limit of the fixed Rookie behavior.
+- Exposure's measurable effect vs the pre-exposure baseline: stationary spammer
+  82.5% -> 60%; and it lets script (1) punish an Exposed AI for 1.75x. See
+  docs/benchmark-baseline.txt and docs/decisions/008-exposure-anti-spam.md.
