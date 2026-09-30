@@ -23,7 +23,15 @@ import {
   settleMatch,
   resolvePendingOnLoad,
   resolveFightResult,
+  restDay,
+  applyBasicCare,
+  applyPremiumTreatment,
+  calculateInjuryModifiers,
+  hasSevereInjury,
+  CAREER_TUNING,
   type CareerState,
+  type FightStats,
+  type MatchSettlementSummary,
 } from '../sim';
 import { browserStorage } from '../storage';
 import './styles.css';
@@ -32,7 +40,7 @@ const root = document.querySelector<HTMLDivElement>('#app')!;
 const storage = browserStorage();
 const list = (value: string) => value.split(',').map((part) => part.trim()).filter(Boolean);
 const whole = (value: number) => Math.round(value).toString();
-const tierLabel = (tier: string) => tier === 'rookie' ? 'Rookie bout' : 'Veteran bout';
+const tierLabel = (tier: string) => tier === 'veteran' ? 'Veteran bout' : 'Rookie bout';
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
 }[character]!));
@@ -41,7 +49,14 @@ export function renderStart(): void {
   const fighter = storage.load();
   root.innerHTML = `<main class="shell start-screen"><div class="eyebrow">MULTIDIMENSIONAL ARENA</div><h1>Enter the arena.</h1><p class="lede">Build a fighter with a history, a style, and a future worth risking.</p><div class="actions"><button class="primary" id="new">New Fighter</button><button id="continue" ${fighter ? '' : 'disabled'}>Continue</button></div>${fighter ? `<p class="save-note">Save found: ${escapeHtml(fighter.name)}</p>` : '<p class="save-note">No fighter saved yet.</p>'}</main>`;
   root.querySelector('#new')!.addEventListener('click', renderCreation);
-  root.querySelector('#continue')?.addEventListener('click', () => { const game = storage.loadGame(); if (game) { const resolved = resolvePendingOnLoad(game); if (resolved.summary) storage.saveGame(resolved.state); renderHub(resolved.state.fighter, resolved.summary ? 'You abandoned your last match. Fee lost.' : undefined); } });
+  root.querySelector('#continue')?.addEventListener('click', () => {
+    const game = storage.loadGame();
+    if (game) {
+      const resolved = resolvePendingOnLoad(game);
+      if (resolved.summary) storage.saveGame(resolved.state);
+      renderHub(resolved.state.fighter, resolved.summary ? 'You abandoned your last match. Fee lost.' : undefined);
+    }
+  });
 }
 
 function field(label: string, name: string, placeholder: string, required = true): string {
@@ -86,37 +101,147 @@ export function renderCreation(): void {
 }
 
 export function renderHub(fighter: Fighter, notice?: string): void {
-  const game = storage.loadGame() ?? { fighter, career: { rankPoints: 0, wins: 0, losses: 0, draws: 0, history: [], offerSeed: fighter.meta.seed, pendingMatch: null } };
-  const next = Object.entries({ Rookie: 0, Bronze: 5, Silver: 15, Gold: 30, Platinum: 50, Elite: 80, Champion: 120 }).find(([, points]) => points > game.career.rankPoints);
-  root.innerHTML = `<main class="shell"><div class="eyebrow">ARENA HUB</div><h1>${escapeHtml(fighter.name)}</h1>${notice ? `<p class="save-note">${escapeHtml(notice)}</p>` : ''}<section class="card"><h2>${escapeHtml(fighter.progression.rank)}</h2><p>${game.career.rankPoints} rank points${next ? ` · ${next[1] - game.career.rankPoints} to ${next[0]}` : ' · Champion'}</p><dl><dt>Credits</dt><dd>${whole(fighter.progression.currency)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section><div class="actions"><button class="primary" id="offers">Find Match</button><button id="training">Training Room</button><button id="history">History</button><button id="profile">Fighter Profile</button></div></main>`;
+  const game = storage.loadGame() ?? {
+    fighter,
+    career: {
+      day: 1,
+      rankPoints: 0,
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      grudges: [],
+      history: [],
+      offerSeed: fighter.meta.seed,
+      pendingMatch: null,
+    },
+  };
+
+  const next = Object.entries(CAREER_TUNING.ranks).find(([, points]) => points > game.career.rankPoints);
+  const injuries = game.fighter.condition?.injuries ?? [];
+
+  root.innerHTML = `<main class="shell"><div class="eyebrow">ARENA HUB</div><h1>${escapeHtml(fighter.name)}</h1>${notice ? `<p class="save-note">${escapeHtml(notice)}</p>` : ''}<section class="card"><h2>${escapeHtml(fighter.progression.rank)}</h2><p>${game.career.rankPoints} rank points${next ? ` · ${next[1] - game.career.rankPoints} to ${next[0]}` : ' · Champion'}</p><dl><dt>Day</dt><dd>${game.career.day ?? 1}</dd><dt>Condition</dt><dd><strong>${describeCondition(fighter)}</strong></dd><dt>Credits</dt><dd>${whole(fighter.progression.currency)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section>${injuries.length > 0 ? `<section class="card"><h2>Current Injuries</h2><ul>${injuries.map((i) => `<li><strong>${escapeHtml(i.name)}</strong> (${i.severity}, ${i.daysRemaining.toFixed(1)} days left, ${i.treated ? 'treated' : 'untreated'})</li>`).join('')}</ul></section>` : ''}<div class="actions"><button class="primary" id="offers">Find Match</button><button id="clinic">Clinic</button><button id="rest">Rest a day</button><button id="training">Training Room</button><button id="history">History</button><button id="profile">Fighter Profile</button></div></main>`;
+
   root.querySelector('#offers')!.addEventListener('click', () => renderOffers(game));
+  root.querySelector('#clinic')!.addEventListener('click', () => renderClinic(game));
+  root.querySelector('#rest')!.addEventListener('click', () => {
+    const rested = restDay(game);
+    storage.saveGame(rested);
+    renderHub(rested.fighter, 'You rested for a day. Time passed and injuries healed.');
+  });
   root.querySelector('#training')!.addEventListener('click', () => renderArena());
   root.querySelector('#history')!.addEventListener('click', () => renderHistory(game));
   root.querySelector('#profile')!.addEventListener('click', () => renderProfile(fighter));
 }
-function renderOffers(game: CareerState): void { const offers = createOffers(game.career.offerSeed, game.fighter, game.career); root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">FIND MATCH</div><h1>Choose your risk.</h1><div class="actions">${offers.map((o) => `<article class="card"><h2>${o.id === 'open-ring' ? 'Open Ring' : o.id === 'rookie-bout' ? 'Rookie Bout' : 'Veteran Bout'}</h2><p>${escapeHtml(o.opponent)} · ${o.id === 'open-ring' ? 'Open Ring' : tierLabel(o.tier)}${o.dangerous ? ' · Dangerous' : ''}</p><p>Fee ${whole(o.fee)} · Purse ${whole(o.purse)}</p><p>Win pays about ${o.fee * 2 + Math.round(o.purse * .1) - o.fee}–${o.fee * 2 + Math.round(o.purse * .2) - o.fee} net</p><button data-offer="${o.id}" ${game.fighter.progression.currency < o.fee ? 'disabled title="Not enough credits"' : ''}>Accept</button></article>`).join('')}</div></main>`; root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter)); root.querySelectorAll<HTMLButtonElement>('[data-offer]').forEach((button) => button.addEventListener('click', () => { const offer = offers.find((o) => o.id === button.dataset.offer)!; const started = startMatch(game, offer); storage.saveGame(started); renderArena(started.fighter, offer); })); }
-function renderHistory(game: CareerState): void { root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">HISTORY</div><h1>Match history</h1>${game.career.history.slice().reverse().map((h) => `<section class="card"><strong>${h.outcome.toUpperCase()} · ${escapeHtml(h.opponent)}</strong><p>${h.tier === 'rookie' ? 'Rookie bout' : 'Veteran bout'} · ${h.netCurrency >= 0 ? '+' : ''}${whole(h.netCurrency)} credits · ${h.durationSeconds.toFixed(1)}s · rank ${h.rankPointsDelta >= 0 ? '+' : ''}${h.rankPointsDelta}</p></section>`).join('') || '<p>No matches yet.</p>'}</main>`; root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter)); }
 
-function renderResult(state: CareerState, summary: { outcome: string; breakdown: string[]; promotedTo?: string }): void {
+export function renderClinic(game: CareerState): void {
+  const injuries = game.fighter.condition?.injuries ?? [];
+  const currency = game.fighter.progression.currency;
+
+  root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">ARENA CLINIC</div><h1>Medical Bay</h1><p class="lede">Treat ring trauma with free basic stabilization or paid intensive care.</p><p><strong>Available credits:</strong> ${whole(currency)}</p>${injuries.length === 0 ? '<section class="card"><p class="muted">You have no injuries to treat. Your body is ready for the ring.</p></section>' : injuries.map((i) => {
+    const price = CAREER_TUNING.injuries.clinic.premiumPrices[i.severity];
+    const canAfford = currency >= price;
+    return `<section class="card"><h2>${escapeHtml(i.name)}</h2><p><strong>Area:</strong> ${i.area} · <strong>Severity:</strong> ${i.severity} · <strong>Time remaining:</strong> ${i.daysRemaining.toFixed(1)} days · <strong>Status:</strong> ${i.treated ? 'Treated (heals 1.0/day)' : 'Untreated (heals 0.5/day)'}</p><div class="actions"><button data-basic="${i.id}" ${i.treated ? 'disabled title="Already received basic care"' : ''}>Basic Care (Free)</button><button data-premium="${i.id}" class="primary" ${canAfford ? '' : 'disabled title="Not enough credits"'}>Premium Treatment (${price} credits)</button></div></section>`;
+  }).join('')}</main>`;
+
+  root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter));
+
+  root.querySelectorAll<HTMLButtonElement>('[data-basic]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const updated = applyBasicCare(game, btn.dataset.basic!);
+      storage.saveGame(updated);
+      renderClinic(updated);
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-premium]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const updated = applyPremiumTreatment(game, btn.dataset.premium!);
+      storage.saveGame(updated);
+      renderClinic(updated);
+    });
+  });
+}
+
+function renderOffers(game: CareerState): void {
+  const offers = createOffers(game.career.offerSeed, game.fighter, game.career);
+  const severe = hasSevereInjury(game.fighter.condition?.injuries ?? []);
+  const modifiers = calculateInjuryModifiers(game.fighter.condition?.injuries ?? []);
+  const penalties: string[] = [];
+  if (modifiers.attackDamage < 1) penalties.push(`-${Math.round((1 - modifiers.attackDamage) * 100)}% attack damage`);
+  if (modifiers.moveSpeed < 1) penalties.push(`-${Math.round((1 - modifiers.moveSpeed) * 100)}% move speed`);
+  if (modifiers.maxHealth < 1) penalties.push(`-${Math.round((1 - modifiers.maxHealth) * 100)}% max health`);
+  if (modifiers.maxStamina < 1) penalties.push(`-${Math.round((1 - modifiers.maxStamina) * 100)}% max stamina`);
+
+  root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">FIND MATCH</div><h1>Choose your risk.</h1>${penalties.length > 0 ? `<p class="save-note" style="color: #ffb56b;">Injuries in effect: ${penalties.join(', ')}</p>` : ''}<div class="actions">${offers.map((o) => {
+    const cardTitle = o.id === 'open-ring' ? 'Open Ring' : o.id === 'rookie-bout' ? 'Rookie Bout' : o.id === 'veteran-bout' ? 'Veteran Bout' : 'Revenge Bout';
+    const known = game.career.history.some((h) => h.opponentId === o.opponentId || h.opponent === o.opponent);
+    const knownText = known ? ` · Known: ${o.temperament}` : '';
+    const subtitle = `${escapeHtml(o.opponent)} · ${o.id === 'open-ring' ? 'Open Ring' : o.id === 'revenge-bout' ? 'Revenge bout' : tierLabel(o.tier)}${o.dangerous ? ' · Dangerous' : ''}${knownText}`;
+    const minNet = o.fee * 2 + Math.round(o.purse * 0.1) + (o.revenge ? CAREER_TUNING.offers.revengeBounty : 0) - o.fee;
+    const maxNet = o.fee * 2 + Math.round(o.purse * 0.2) + (o.revenge ? CAREER_TUNING.offers.revengeBounty : 0) - o.fee;
+
+    let disabled = false;
+    let reason = '';
+    if (o.fee > 0 && severe) {
+      disabled = true;
+      reason = 'Severe injury - visit the clinic or rest';
+    } else if (game.fighter.progression.currency < o.fee) {
+      disabled = true;
+      reason = 'Not enough credits';
+    }
+
+    return `<article class="card"><h2>${cardTitle}</h2><p>${subtitle}</p><p>Fee ${whole(o.fee)} · Purse ${whole(o.purse)}${o.revenge ? ` · Bounty ${CAREER_TUNING.offers.revengeBounty}` : ''}</p><p>Win pays about ${minNet}–${maxNet} net</p><button data-offer="${o.id}" ${disabled ? `disabled title="${reason}"` : ''}>Accept</button></article>`;
+  }).join('')}</div></main>`;
+
+  root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter));
+  root.querySelectorAll<HTMLButtonElement>('[data-offer]').forEach((button) =>
+    button.addEventListener('click', () => {
+      const offer = offers.find((o) => o.id === button.dataset.offer)!;
+      const started = startMatch(game, offer);
+      storage.saveGame(started);
+      renderArena(started.fighter, offer);
+    }),
+  );
+}
+
+function renderHistory(game: CareerState): void {
+  const activeGrudges = (game.career.grudges ?? []).filter((g) => g.status === 'active');
+
+  root.innerHTML = `<main class="shell"><button class="back" id="back">← Hub</button><div class="eyebrow">HISTORY</div><h1>Match history</h1><section class="card"><h2>Grudges</h2>${activeGrudges.length > 0 ? activeGrudges.map((g) => `<div style="margin-bottom: 12px;"><strong>${escapeHtml(g.name)}</strong> · <span class="muted">${g.temperament}</span> · <small>Day ${g.sinceDay}</small><p style="margin: 4px 0 0;">${g.harm.map(escapeHtml).join(', ')}</p></div>`).join('') : '<p class="muted">No active grudges.</p>'}</section>${(game.career.history ?? []).slice().reverse().map((h) => `<section class="card"><strong>${h.outcome.toUpperCase()} · ${escapeHtml(h.opponent)}</strong><p>${escapeHtml(h.label || (h.tier === 'veteran' ? 'Veteran bout' : 'Rookie bout'))} · Day ${h.day ?? 1} · ${h.netCurrency >= 0 ? '+' : ''}${whole(h.netCurrency)} credits · ${h.durationSeconds.toFixed(1)}s · rank ${h.rankPointsDelta >= 0 ? '+' : ''}${h.rankPointsDelta}</p>${h.aftermath && h.aftermath.length > 0 ? `<div>${h.aftermath.map((l) => `<p class="muted"><em>${escapeHtml(l)}</em></p>`).join('')}</div>` : ''}${h.injuriesTaken && h.injuriesTaken.length > 0 ? `<p><small>Injuries taken: ${h.injuriesTaken.map(escapeHtml).join(', ')}</small></p>` : ''}${h.grudgeCreated ? `<p><small style="color: #ff8e9b;">⚠️ Grudge formed</small></p>` : ''}${h.grudgeSettled ? `<p><small style="color: #62dda2;">⚔️ Grudge settled</small></p>` : ''}</section>`).join('') || '<p>No matches yet.</p>'}</main>`;
+
+  root.querySelector('#back')!.addEventListener('click', () => renderHub(game.fighter));
+}
+
+function renderResult(state: CareerState, summary: MatchSettlementSummary): void {
   const title = summary.outcome === 'win' ? 'Victory' : summary.outcome === 'loss' ? 'Defeat' : summary.outcome === 'draw' ? 'Draw' : 'Forfeit';
-  root.innerHTML = `<main class="shell"><div class="eyebrow">MATCH RESULT</div><h1>${title}</h1><section class="card">${summary.breakdown.map((line) => `<p>${escapeHtml(line)}</p>`).join('')}<p>Credits: ${whole(state.fighter.progression.currency)}</p><p>Rank points: ${state.career.rankPoints}</p>${summary.promotedTo ? `<strong>Promoted to ${escapeHtml(summary.promotedTo)}</strong>` : ''}</section><div class="actions"><button class="primary" id="hub">Back to Hub</button><button id="again">Fight Again</button></div></main>`;
+
+  root.innerHTML = `<main class="shell"><div class="eyebrow">MATCH RESULT</div><h1>${title}</h1><section class="card">${summary.aftermath && summary.aftermath.length > 0 ? `<div style="margin-bottom: 16px;">${summary.aftermath.map((l) => `<p><em>${escapeHtml(l)}</em></p>`).join('')}</div>` : ''}${summary.grudgeCreated ? `<p class="save-note" style="color: #ff8e9b; margin-bottom: 12px;">⚠️ <strong>${escapeHtml(summary.opponentName)} is now on your list.</strong></p>` : ''}${summary.grudgeSettled ? `<p class="save-note" style="color: #62dda2; margin-bottom: 12px;">⚔️ <strong>You settled the score with ${escapeHtml(summary.opponentName)}.</strong></p>` : ''}${summary.newInjuries && summary.newInjuries.length > 0 ? `<div style="margin-bottom: 14px;"><strong>Injuries Sustained:</strong><ul>${summary.newInjuries.map((i) => `<li>${escapeHtml(i.name)} (${i.severity}, est. ${i.daysRemaining} days)</li>`).join('')}</ul></div>` : ''}${summary.breakdown.map((line) => `<p>${escapeHtml(line)}</p>`).join('')}<p>Credits: ${whole(state.fighter.progression.currency)}</p><p>Rank points: ${state.career.rankPoints}</p>${summary.promotedTo ? `<strong>Promoted to ${escapeHtml(summary.promotedTo)}</strong>` : ''}</section><div class="actions"><button class="primary" id="hub">Back to Hub</button><button id="again">Fight Again</button></div></main>`;
+
   root.querySelector('#hub')!.addEventListener('click', () => renderHub(state.fighter));
   root.querySelector('#again')!.addEventListener('click', () => renderOffers(state));
 }
 
 export function renderProfile(fighter: Fighter): void {
   const itemList = (values: string[]) => values.length ? values.map(escapeHtml).join(', ') : 'None';
-  root.innerHTML = `<main class="shell"><button class="back" id="home">← Hub</button><div class="profile-heading"><div><div class="eyebrow">FIGHTER PROFILE</div><h1>${escapeHtml(fighter.name)}</h1><p class="muted">${escapeHtml(fighter.species)} · ${escapeHtml(fighter.origin)}</p></div><div class="badge">${escapeHtml(fighter.progression.rank)}</div></div><div class="condition"><span class="pulse"></span><div><strong>${describeCondition(fighter)}</strong><small>Current condition</small></div></div><section class="card"><h2>Identity</h2><dl><dt>Background</dt><dd>${escapeHtml(fighter.background)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Titles</dt><dd>${itemList(fighter.progression.titles)}</dd><dt>Currency</dt><dd>${whole(fighter.progression.currency)} credits</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd></dl></section><section class="card"><h2>Combat identity</h2><dl><dt>Primary style</dt><dd>${escapeHtml(fighter.primaryStyle)}</dd><dt>Secondary styles</dt><dd>${itemList(fighter.secondaryStyles)}</dd><dt>Power system</dt><dd>${escapeHtml(fighter.powerSystem)}</dd><dt>Weapons</dt><dd>${itemList(fighter.weapons)}</dd><dt>Equipment</dt><dd>${itemList(fighter.equipment)}</dd><dt>Special abilities</dt><dd>${itemList(fighter.specialAbilities)}</dd></dl></section><p class="footer-note">Your fighter is saved on this device. Enter the Training Room from the Arena Hub.</p></main>`;
+  const injuries = fighter.condition?.injuries ?? [];
+
+  root.innerHTML = `<main class="shell"><button class="back" id="home">← Hub</button><div class="profile-heading"><div><div class="eyebrow">FIGHTER PROFILE</div><h1>${escapeHtml(fighter.name)}</h1><p class="muted">${escapeHtml(fighter.species)} · ${escapeHtml(fighter.origin)}</p></div><div class="badge">${escapeHtml(fighter.progression.rank)}</div></div><div class="condition"><span class="pulse"></span><div><strong>${describeCondition(fighter)}</strong><small>Current condition</small></div></div><section class="card"><h2>Identity</h2><dl><dt>Background</dt><dd>${escapeHtml(fighter.background)}</dd><dt>Reputation</dt><dd>${escapeHtml(fighter.progression.reputation)}</dd><dt>Titles</dt><dd>${itemList(fighter.progression.titles)}</dd><dt>Currency</dt><dd>${whole(fighter.progression.currency)} credits</dd><dt>Housing</dt><dd>${escapeHtml(fighter.progression.housing)}</dd>${injuries.length > 0 ? `<dt>Injuries</dt><dd>${injuries.map((i) => `${escapeHtml(i.name)} (${i.severity}, ${i.daysRemaining.toFixed(1)}d)`).join(', ')}</dd>` : ''}</dl></section><section class="card"><h2>Combat identity</h2><dl><dt>Primary style</dt><dd>${escapeHtml(fighter.primaryStyle)}</dd><dt>Secondary styles</dt><dd>${itemList(fighter.secondaryStyles)}</dd><dt>Power system</dt><dd>${escapeHtml(fighter.powerSystem)}</dd><dt>Weapons</dt><dd>${itemList(fighter.weapons)}</dd><dt>Equipment</dt><dd>${itemList(fighter.equipment)}</dd><dt>Special abilities</dt><dd>${itemList(fighter.specialAbilities)}</dd></dl></section><p class="footer-note">Your fighter is saved on this device. Enter the Training Room from the Arena Hub.</p></main>`;
+
   root.querySelector('#home')!.addEventListener('click', () => renderHub(fighter));
 }
 
-const arenaMarkup = (fighterName: string, official = false, tier = 'rookie'): string => { const controls = official ? '<div class="match-lock">OFFICIAL MATCH · ARENA LOCK</div>' : '<button class="leave" id="leave">Leave</button><div class="opponent-toggle" role="group" aria-label="Training target"><button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="rookie" class="selected" aria-pressed="true">Rookie</button><button data-mode="veteran" aria-pressed="false">Veteran</button></div>'; return `<main class="arena-screen">
+const arenaMarkup = (fighterName: string, official = false, opponentTitle = 'Rookie Opponent'): string => {
+  const controls = official
+    ? '<div class="match-lock">OFFICIAL MATCH · ARENA LOCK</div>'
+    : '<button class="leave" id="leave">Leave</button><div class="opponent-toggle" role="group" aria-label="Training target"><button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="rookie" class="selected" aria-pressed="true">Rookie</button><button data-mode="veteran" aria-pressed="false">Veteran</button></div>';
+
+  return `<main class="arena-screen">
   ${controls}
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
-    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div><small class="ai-pattern" data-ai-pattern>pattern: neutral</small></div>
+    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div><small data-penalty-line class="ai-pattern" style="display:none; color:#ffb56b;"></small></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>${escapeHtml(opponentTitle)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div><div class="hud-label stamina-label"><span>Exposure</span><span><span data-value="exposure"></span> <b data-value="exposure-multiplier">x1.0</b></span></div><div class="meter exposure"><i data-bar="exposure"></i></div><small class="ai-pattern" data-ai-pattern>pattern: neutral</small></div>
   </aside>
   <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
@@ -125,7 +250,8 @@ const arenaMarkup = (fighterName: string, official = false, tier = 'rookie'): st
     <button class="combat-button block-button" data-control="block" aria-label="Hold to block">Block<kbd>K</kbd></button>
     <button class="combat-button dodge-button" data-control="dodge" aria-label="Dodge">Dodge<kbd>L</kbd></button>
   </div>
-</main>`; }
+</main>`;
+};
 
 export function renderArena(officialFighter?: Fighter, officialOffer?: import('../sim').Offer): void {
   const fighter = officialFighter ?? storage.load();
@@ -134,7 +260,8 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
     return;
   }
   const official = Boolean(officialOffer);
-  root.innerHTML = arenaMarkup(fighter.name, official, officialOffer?.tier);
+  const opponentTitle = officialOffer ? officialOffer.opponent : 'Rookie Opponent';
+  root.innerHTML = arenaMarkup(fighter.name, official, opponentTitle);
 
   const canvas = root.querySelector<HTMLCanvasElement>('#arena-canvas')!;
   const ctx = canvas.getContext('2d')!;
@@ -144,6 +271,7 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
   const resultTitle = resultPanel.querySelector<HTMLElement>('[data-result-title]')!;
   const resultDetail = resultPanel.querySelector<HTMLElement>('[data-result-detail]')!;
   const opponentLabel = root.querySelector<HTMLElement>('[data-opponent-label]')!;
+  const penaltyLine = root.querySelector<HTMLElement>('[data-penalty-line]')!;
   const modeButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mode]'));
   const actionButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-control]'));
   const attackButton = root.querySelector<HTMLButtonElement>('[data-control="attack"]')!;
@@ -155,8 +283,27 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
 
   type ArenaMode = 'dummy' | 'rookie' | 'veteran';
   let mode: ArenaMode = officialOffer?.tier === 'veteran' ? 'veteran' : official ? 'rookie' : 'rookie';
-  let state = createOpponentCombatState(fighter.hiddenStats);
-  let aiState: AiState = createAiState(officialOffer?.matchSeed ?? fighter.meta.seed, state.player, mode === 'veteran' ? VETERAN_PROFILE : ROOKIE_PROFILE);
+
+  const playerModifiers = official ? calculateInjuryModifiers(fighter.condition?.injuries ?? []) : undefined;
+  let state = createOpponentCombatState(fighter.hiddenStats, playerModifiers);
+  let aiState: AiState = createAiState(
+    officialOffer?.matchSeed ?? fighter.meta.seed,
+    state.player,
+    mode === 'veteran' ? VETERAN_PROFILE : ROOKIE_PROFILE,
+  );
+
+  if (playerModifiers) {
+    const penalties: string[] = [];
+    if (playerModifiers.attackDamage < 1) penalties.push(`-${Math.round((1 - playerModifiers.attackDamage) * 100)}% dmg`);
+    if (playerModifiers.moveSpeed < 1) penalties.push(`-${Math.round((1 - playerModifiers.moveSpeed) * 100)}% spd`);
+    if (playerModifiers.maxHealth < 1) penalties.push(`-${Math.round((1 - playerModifiers.maxHealth) * 100)}% hp`);
+    if (playerModifiers.maxStamina < 1) penalties.push(`-${Math.round((1 - playerModifiers.maxStamina) * 100)}% sta`);
+    if (penalties.length > 0) {
+      penaltyLine.style.display = 'block';
+      penaltyLine.textContent = `injuries: ${penalties.join(', ')}`;
+    }
+  }
+
   let accumulator = 0;
   let last = performance.now();
   let frame = 0;
@@ -184,7 +331,6 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
   on(window, 'resize', resize);
   resize();
 
-  // Joystick placement and mapping are unchanged: the rendered base remains the source of truth.
   const padGeometry = () => {
     const rect = pad.getBoundingClientRect();
     const baseRadius = rect.width / 2;
@@ -331,15 +477,19 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
     hud.classList.toggle('guard-broken', combatant.guardBroken);
     hud.classList.toggle('defeated', combatant.defeated);
   };
+
   const updateHud = () => {
-    // The attack button is a radial fill that completes when the next attack is available.
     attackButton.style.setProperty('--cooldown', `${Math.round(state.player.attackCooldownFraction * 100)}%`);
     attackButton.classList.toggle('cooling', state.player.attackCooldownFraction < 1);
     updateHudCombatant('player', state.player);
     updateHudCombatant('dummy', state.dummy);
-    opponentLabel.textContent = mode === 'rookie'
-      ? 'Rookie Opponent'
-      : mode === 'veteran' ? 'Veteran Opponent' : 'Training Dummy';
+    opponentLabel.textContent = officialOffer
+      ? officialOffer.opponent
+      : mode === 'rookie'
+        ? 'Rookie Opponent'
+        : mode === 'veteran'
+          ? 'Veteran Opponent'
+          : 'Training Dummy';
     root.querySelector<HTMLElement>('[data-ai-pattern]')!.textContent = `pattern: ${mode === 'veteran' ? aiState.pattern : 'neutral'}`;
     resultPanel.hidden = !state.fightOver;
     if (state.winner === 'player') {
@@ -362,6 +512,7 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       scale,
     };
   };
+
   const drawCombatant = (combatant: CombatState['player']) => {
     const point = project(combatant.position);
     const isPlayer = combatant.id === 'player';
@@ -414,7 +565,6 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       ctx.arc(point.x, point.y, 23, angle - 0.75, angle + 0.75);
       ctx.stroke();
       if (sparking) {
-        // Spark: a short bright flare on the shield where the hit landed.
         ctx.strokeStyle = '#fff6c8';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -424,7 +574,6 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       }
     }
 
-    // Guard broken: a distinct wobbling ring for the whole stagger.
     if (combatant.guardBroken || guardBreakFlashTicks[combatant.id] > 0) {
       const wobble = Math.sin(state.tick * 0.55) * 3;
       ctx.strokeStyle = '#ffd34d';
@@ -434,7 +583,6 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       ctx.stroke();
     }
 
-    // Exposed: guard is down. A red pulsing ring plus a red body tint reads at a glance.
     if (combatant.exposed && !combatant.defeated) {
       const bodyRadius = isPlayer ? 13 : 15;
       const pulse = 0.5 + 0.5 * Math.sin(state.tick * 0.4);
@@ -449,7 +597,6 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       ctx.stroke();
     }
 
-    // Charge ring: fills while the attack interval runs down.
     if (!combatant.defeated && combatant.attackCooldownFraction < 1) {
       ctx.strokeStyle = '#ffb56b88';
       ctx.lineWidth = 3;
@@ -486,8 +633,8 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
 
   const resetFight = () => {
     state = mode !== 'dummy'
-      ? createOpponentCombatState(fighter.hiddenStats)
-      : createCombatState(fighter.hiddenStats);
+      ? createOpponentCombatState(fighter.hiddenStats, playerModifiers)
+      : createCombatState(fighter.hiddenStats, playerModifiers);
     aiState = createAiState(
       fighter.meta.seed,
       state.player,
@@ -507,6 +654,7 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
     }
     draw();
   };
+
   root.querySelector('#reset-fight')?.addEventListener('click', resetFight);
   for (const button of modeButtons) {
     button.addEventListener('click', () => {
@@ -564,7 +712,21 @@ export function renderArena(officialFighter?: Fighter, officialOffer?: import('.
       guardBreakFlashTicks.dummy = Math.max(0, guardBreakFlashTicks.dummy - 1);
       if (officialOffer && !officialSettled) {
         const outcome = resolveFightResult(state.player.health, state.dummy.health, state.tick);
-        if (outcome) { officialSettled = true; const game = storage.loadGame(); if (game) { const settled = settleMatch(game, outcome, state.tick); storage.saveGame(settled.state); cancelAnimationFrame(frame); renderResult(settled.state, settled.summary); return; } }
+        if (outcome) {
+          officialSettled = true;
+          const game = storage.loadGame();
+          if (game) {
+            const fightStats: FightStats = {
+              playerHealthRatio: Math.max(0, state.player.health / state.player.maxHealth),
+              opponentHealthRatio: Math.max(0, state.dummy.health / state.dummy.maxHealth),
+            };
+            const settled = settleMatch(game, outcome, state.tick, fightStats);
+            storage.saveGame(settled.state);
+            cancelAnimationFrame(frame);
+            renderResult(settled.state, settled.summary);
+            return;
+          }
+        }
       }
     }
     draw();

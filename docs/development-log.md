@@ -64,7 +64,6 @@ The debug HUD gained an orange Exposure bar for both fighters (reading `EXPOSED`
 
 A scripted seven-scenario benchmark (`scripts/benchmark.ts`, 40 seeds) was run before the change (baseline) and after (final). Exposure and the AI hooks moved the stationary-spammer win rate from 82.5% to 60% and the counter-puncher scenario from a loss to a 100% AI win; the idle-player, hold-block, gap-close, two-spammer, and AI-vs-AI goals all pass with no stalemates. The stationary-spammer goal of ≤50% was not reachable without dropping the "AI beats a pure blocker ≥90%" fairness goal — a limit of the fixed Rookie behavior — so tuning was chosen to protect fairness (documented in decision 008). Vitest grew to 131 tests (16 new exposure tests, 5 new AI exposure-hook tests, and the two Phase 1c.2 engagement-cycle AI tests removed with the revert), all run without a browser. The save schema stays at version 1 and combat state is still session-only. Spacing/engagement AI, adaptive AI, feints, parry/perfect block, heavy attacks, and weapons remain planned only.
 
-
 ## 2026-09-30 — Phase 1c.4 — proportional Exposure and Rookie benchmark
 
 Reworked Exposure into a shared proportional health-damage multiplier: x1.0 at zero, x1.375
@@ -99,3 +98,16 @@ The benchmark now reports both tiers over 40 seeds, guard-break timing, pattern 
 versus Rookie. Combat/AI remain DOM-free and session-only; save schema version 1 is unchanged.
 Adaptive learning across fights, feints, parry/perfect block, heavy attacks, and weapons remain
 planned only.
+
+## 2026-09-30 — Phase 6b — Career loop, slice 2: injuries, clinic, day counter, temperaments, grudges, and save schema v3
+
+Implemented the complete career consequence foundation:
+1. **Slice 1 cleanups:** Re-formatted `src/sim/career.ts` and `tests/career.test.ts` into clean, modular multi-line code with named settlement helpers; corrected history offer labeling for Open Ring, Rookie, Veteran, and Revenge bouts; and surfaced "Entry fee lost: N" on defeat/forfeit breakdowns.
+2. **Day Counter & Pacing:** `career.day` starts at 1 and advances on settled official matches and `restDay(state)`. Existing injuries heal on each day advance prior to evaluating new match injuries.
+3. **Structured Injuries & Modifiers:** Tracked in `fighter.condition.injuries` across 4 body areas (Head, Ribs, Arm, Leg) with base durations (2, 5, 10 days) and natural healing rates (0.5 untreated, 1.0 treated). Area penalties scale max health, max stamina, attack damage, and move speed, capped at 0.40 with a 0.60 floor. Severe injuries lock paid official bouts while Open Ring remains available. Combat simulation accepts optional combatant modifiers applied in official matches.
+4. **Opponent Roster & Temperaments:** Added fixed 8-opponent roster with immutable Professional, Brutal, and Ruthless temperaments driving deterministic injury distributions. Forfeits count as losses for injury generation to eliminate exploit paths.
+5. **Medical Clinic:** Free Basic Care (sets treated flag) and Paid Premium Treatment (minor 15 credits, moderate 40 credits, severe 90 credits; heals minor/moderate immediately, downgrades severe to moderate with 2.5 days remaining).
+6. **Grudges & Revenge Bouts:** Defeats reaching severity score 3 or moderate+ trauma from ruthless rivals create active grudges (max 3). Active grudges offer a 4th Revenge card (1.5x purse, +1 rank, +25 bounty) that settles the score on victory.
+7. **Aftermath Text:** Deterministic pure function producing 1-3 lines of narrative recap reflecting outcome, opponent demeanor, injuries, and grudge evolution.
+8. **Save Schema v3:** Complete migration from v1 and v2 formats with defensive structure validation and legacy key preservation.
+9. **UI & Testing:** Full Hub, Clinic, Offers, History, Profile, and Result screens with mobile-first controls. Suite expanded to 206 tests with 100% pass rate.
