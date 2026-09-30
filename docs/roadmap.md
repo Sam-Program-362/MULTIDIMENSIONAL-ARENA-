@@ -1,7 +1,7 @@
 # Roadmap
 
 - **Phase 0 — Project Foundation (complete)** — Documentation and repository safeguards established.
-- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b fixed-timestep movement and tuned deterministic combat basics, and Phase 1c's first seeded Rookie opponent are implemented. Stamina is a defensive resource: basic attacks are sustainable, while blocking and dodging spend the bar. The current session-only training fight can switch between a stationary dummy and a delayed-observation, non-frame-perfect opponent; both use the same attack/block/dodge rules and debug HUD.
+- **Phase 1 — Simulation Foundations (in progress)** — Phase 1a fighter creation/save-load, Phase 1b fixed-timestep movement and tuned deterministic combat basics, and Phase 1c's first seeded Rookie opponent are implemented. Phase 1c.1 added endurance (the guard resource), guard breaks, a per-attack minimum interval, and AI guard/punish/dash behavior. Stamina pays for attacks and dodges; endurance absorbs blocked hits and breaks the guard when it empties. The current session-only training fight can switch between a stationary dummy and a delayed-observation, non-frame-perfect opponent; both use the same attack/block/dodge rules and debug HUD.
 - Phase 2 — Persistent World State (planned)
 - Phase 3 — World Events (planned)
 - Phase 4 — Actors and Factions (planned)
@@ -23,4 +23,6 @@
 - Multiple simultaneous opponents.
 - Fight rewards or progression consequences.
 - A Heavy attack button.
+- A weapon/equipment system supplying per-weapon attack profiles.
+- Parry / perfect block and hit-stop.
 - An optional button that frees movement from auto-facing.

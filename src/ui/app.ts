@@ -89,8 +89,8 @@ const arenaMarkup = (fighterName: string): string => `<main class="arena-screen"
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
-    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
+    <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div><div class="hud-label stamina-label"><span>Endurance</span><span data-value="endurance"></span></div><div class="meter endurance"><i data-bar="endurance"></i></div></div>
   </aside>
   <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
@@ -119,6 +119,7 @@ export function renderArena(): void {
   const opponentLabel = root.querySelector<HTMLElement>('[data-opponent-label]')!;
   const modeButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mode]'));
   const actionButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-control]'));
+  const attackButton = root.querySelector<HTMLButtonElement>('[data-control="attack"]')!;
   const cleanup: Array<() => void> = [];
   const on = <K extends keyof WindowEventMap>(target: Window, type: K, listener: (event: WindowEventMap[K]) => void) => {
     target.addEventListener(type, listener as EventListener);
@@ -142,6 +143,7 @@ export function renderArena(): void {
   const flashTicks: Record<'player' | 'dummy', number> = { player: 0, dummy: 0 };
   const blockFlashTicks: Record<'player' | 'dummy', number> = { player: 0, dummy: 0 };
   const dodgeFlashTicks: Record<'player' | 'dummy', number> = { player: 0, dummy: 0 };
+  const guardBreakFlashTicks: Record<'player' | 'dummy', number> = { player: 0, dummy: 0 };
 
   const resize = () => {
     const ratio = devicePixelRatio || 1;
@@ -276,6 +278,7 @@ export function renderArena(): void {
       if (event.type === 'DAMAGE_APPLIED' && event.targetId) flashTicks[event.targetId] = 6;
       if (event.type === 'ATTACK_BLOCKED' && event.targetId) blockFlashTicks[event.targetId] = 8;
       if (event.type === 'DODGE_EVADED' && event.actorId) dodgeFlashTicks[event.actorId] = 8;
+      if (event.type === 'GUARD_BROKEN' && event.actorId) guardBreakFlashTicks[event.actorId] = 24;
     }
   };
 
@@ -283,13 +286,20 @@ export function renderArena(): void {
     const hud = root.querySelector<HTMLElement>(`[data-hud="${id}"]`)!;
     const healthPercent = (combatant.health / combatant.maxHealth) * 100;
     const staminaPercent = (combatant.stamina / combatant.maxStamina) * 100;
+    const endurancePercent = (combatant.endurance / combatant.maxEndurance) * 100;
     hud.querySelector<HTMLElement>('[data-bar="health"]')!.style.width = `${healthPercent}%`;
     hud.querySelector<HTMLElement>('[data-bar="stamina"]')!.style.width = `${staminaPercent}%`;
     hud.querySelector<HTMLElement>('[data-value="health"]')!.textContent = `${Math.ceil(combatant.health)} / ${combatant.maxHealth}`;
     hud.querySelector<HTMLElement>('[data-value="stamina"]')!.textContent = `${Math.ceil(combatant.stamina)} / ${combatant.maxStamina}`;
+    hud.querySelector<HTMLElement>('[data-bar="endurance"]')!.style.width = `${endurancePercent}%`;
+    hud.querySelector<HTMLElement>('[data-value="endurance"]')!.textContent = `${Math.ceil(combatant.endurance)} / ${combatant.maxEndurance}`;
+    hud.classList.toggle('guard-broken', combatant.guardBroken);
     hud.classList.toggle('defeated', combatant.defeated);
   };
   const updateHud = () => {
+    // The attack button is a radial fill that completes when the next attack is available.
+    attackButton.style.setProperty('--cooldown', `${Math.round(state.player.attackCooldownFraction * 100)}%`);
+    attackButton.classList.toggle('cooling', state.player.attackCooldownFraction < 1);
     updateHudCombatant('player', state.player);
     updateHudCombatant('dummy', state.dummy);
     opponentLabel.textContent = mode === 'opponent' ? 'Rookie Opponent' : 'Training Dummy';
@@ -358,10 +368,40 @@ export function renderArena(): void {
 
     if (blocking || blockFlashTicks[combatant.id] > 0) {
       const angle = Math.atan2(combatant.facing.z * 0.6, combatant.facing.x);
-      ctx.strokeStyle = blockFlashTicks[combatant.id] > 0 ? '#ffffff' : '#62dda2';
-      ctx.lineWidth = 5;
+      const sparking = blockFlashTicks[combatant.id] > 0;
+      const enduranceRatio = combatant.endurance / combatant.maxEndurance;
+      ctx.strokeStyle = sparking ? '#ffffff' : enduranceRatio < 0.35 ? '#ffc46b' : '#62dda2';
+      ctx.lineWidth = sparking ? 7 : 5;
       ctx.beginPath();
       ctx.arc(point.x, point.y, 23, angle - 0.75, angle + 0.75);
+      ctx.stroke();
+      if (sparking) {
+        // Spark: a short bright flare on the shield where the hit landed.
+        ctx.strokeStyle = '#fff6c8';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(point.x + Math.cos(angle) * 23, point.y + Math.sin(angle) * 23);
+        ctx.lineTo(point.x + Math.cos(angle) * 34, point.y + Math.sin(angle) * 34);
+        ctx.stroke();
+      }
+    }
+
+    // Guard broken: a distinct wobbling ring for the whole stagger.
+    if (combatant.guardBroken || guardBreakFlashTicks[combatant.id] > 0) {
+      const wobble = Math.sin(state.tick * 0.55) * 3;
+      ctx.strokeStyle = '#ffd34d';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(point.x + wobble, point.y, 27, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Charge ring: fills while the attack interval runs down.
+    if (!combatant.defeated && combatant.attackCooldownFraction < 1) {
+      ctx.strokeStyle = '#ffb56b88';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * combatant.attackCooldownFraction);
       ctx.stroke();
     }
   };
@@ -400,6 +440,7 @@ export function renderArena(): void {
     last = performance.now();
     clearHeldInput();
     flashTicks.player = flashTicks.dummy = 0;
+    guardBreakFlashTicks.player = guardBreakFlashTicks.dummy = 0;
     blockFlashTicks.player = blockFlashTicks.dummy = 0;
     dodgeFlashTicks.player = dodgeFlashTicks.dummy = 0;
     for (const button of modeButtons) {
@@ -457,6 +498,8 @@ export function renderArena(): void {
       blockFlashTicks.dummy = Math.max(0, blockFlashTicks.dummy - 1);
       dodgeFlashTicks.player = Math.max(0, dodgeFlashTicks.player - 1);
       dodgeFlashTicks.dummy = Math.max(0, dodgeFlashTicks.dummy - 1);
+      guardBreakFlashTicks.player = Math.max(0, guardBreakFlashTicks.player - 1);
+      guardBreakFlashTicks.dummy = Math.max(0, guardBreakFlashTicks.dummy - 1);
     }
     draw();
     frame = requestAnimationFrame(loop);

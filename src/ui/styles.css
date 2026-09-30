@@ -21,6 +21,7 @@ form { display: grid; gap: 18px; } section { border: 1px solid #292b39; border-r
 .combat-button kbd { margin-top: 5px; color: #aaaec4; font: 9px 'DM Mono', monospace; }
 .combat-button:hover:not(:disabled) { transform: none; }
 .combat-button.held { transform: scale(.93); border-color: #fff; filter: brightness(1.25); }
+.attack-button.cooling { background: radial-gradient(closest-side, #6d3b32eb 62%, transparent 63%), conic-gradient(#ffb56bcc var(--cooldown, 0%), #2b2030e8 0); }
 .attack-button { right: 0; bottom: 96px; width: 80px; height: 80px; border-color: #ffb56baa; background: #6d3b32eb; }
 .block-button { left: 0; bottom: 2px; border-color: #62dda299; background: #245345eb; }
 .dodge-button { right: 0; bottom: 0; border-color: #69e7ff99; background: #254d65eb; }
@@ -37,6 +38,9 @@ form { display: grid; gap: 18px; } section { border: 1px solid #292b39; border-r
 .meter i { display: block; width: 100%; height: 100%; transition: width 80ms linear; }
 .meter.health i { background: #ee6574; }
 .meter.stamina i { background: #62dda2; }
+/* Debug-only endurance meter: delete with the rest of the debug HUD. */
+.meter.endurance i { background: #7fb2ff; }
+.hud-fighter.guard-broken .meter.endurance i { background: #ffd34d; }
 
 .fight-result { position: absolute; z-index: 5; top: 50%; left: 50%; display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 190px; padding: 18px; border: 1px solid #9c8cff; border-radius: 10px; background: #11131deb; box-shadow: 0 16px 50px #000a; transform: translate(-50%, -50%); }
 .fight-result[hidden] { display: none; }

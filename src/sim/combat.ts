@@ -1,6 +1,44 @@
 import type { HiddenStats } from './fighter';
 import type { MovementInput, Vec2 } from './arena';
 
+/**
+ * A single attack's shape. Future weapons will supply their own profile object; combat code
+ * never reads attack numbers directly, it reads them from the actor's profile.
+ */
+export interface AttackProfile {
+  startupTicks: number;
+  activeTicks: number;
+  recoveryTicks: number;
+  range: number;
+  arcDegrees: number;
+  damage: number;
+  staminaCost: number;
+  /** Start-to-start minimum spacing between two attacks. Extra ticks become a cooldown. */
+  minIntervalTicks: number;
+  lowStaminaDamageMultiplier: number;
+  startupMovementMultiplier: number;
+  activeMovementMultiplier: number;
+  recoveryMovementMultiplier: number;
+}
+
+/** The only attack that exists in this phase. It is the default profile for every combatant. */
+const BASIC_ATTACK_PROFILE: AttackProfile = {
+  startupTicks: 6,
+  activeTicks: 3,
+  recoveryTicks: 15,
+  range: 2.1,
+  arcDegrees: 100,
+  damage: 18,
+  staminaCost: 5,
+  minIntervalTicks: 34,
+  lowStaminaDamageMultiplier: 0.9,
+  startupMovementMultiplier: 0.75,
+  activeMovementMultiplier: 0.6,
+  recoveryMovementMultiplier: 0.85,
+};
+
+export type AttackProfileId = 'basic';
+
 /** Every combat balance value lives here so timing and feel can be reviewed in one place. */
 export const COMBAT_TUNING = {
   tickRate: 60,
@@ -10,28 +48,24 @@ export const COMBAT_TUNING = {
   inputBufferTicks: 6,
   lowStaminaThreshold: 0.25,
   lowStaminaMovementMultiplier: 0.9,
-  attack: {
-    startupTicks: 6,
-    activeTicks: 3,
-    recoveryTicks: 15,
-    range: 2.1,
-    arcDegrees: 100,
-    damage: 18,
-    staminaCost: 5,
-    lowStaminaDamageMultiplier: 0.9,
-    startupMovementMultiplier: 0.75,
-    activeMovementMultiplier: 0.6,
-    recoveryMovementMultiplier: 0.85,
-  },
+  /** Profile table. `attack` below is the same object as `attackProfiles.basic`. */
+  attackProfiles: { basic: BASIC_ATTACK_PROFILE } as Record<AttackProfileId, AttackProfile>,
+  attack: BASIC_ATTACK_PROFILE,
   block: {
     startupTicks: 2,
     recoveryTicks: 5,
     facingArcDegrees: 150,
-    damageReduction: 0.65,
-    staminaPerHit: 12,
     minimumStartStamina: 1,
     movementMultiplier: 0.45,
-    breakStaggerTicks: 9,
+    /** Health damage that leaks through a successful block, as a fraction of raw damage. */
+    blockChipFraction: 0,
+    /** Endurance removed per point of blocked damage. */
+    enduranceDrainPerDamage: 1,
+    enduranceRegenPerTick: 0.25,
+    /** Ticks without a blocked hit before endurance starts recovering. */
+    enduranceRegenDelayTicks: 45,
+    guardBreakStaggerTicks: 30,
+    guardBreakResetRatio: 0.5,
   },
   dodge: {
     startupTicks: 1,
@@ -47,9 +81,9 @@ export const COMBAT_TUNING = {
      * Stamina regenerates every tick. It pauses only while block is held/active and for the
      * whole dodge action, and resumes on the first tick after those end.
      *
-     * `regenDelayTicks` is the ONLY regen pause that outlives an action, and it is applied
-     * exclusively after a block break, so that punish gap can be tuned without code changes.
-     * At the default 0 a broken block regenerates again immediately.
+     * `regenDelayTicks` is the ONLY stamina regen pause that outlives an action, and it is
+     * applied exclusively after a guard break, so that punish gap can be tuned without code
+     * changes. At the default 0 a broken guard regenerates stamina again immediately.
      */
     regenDelayTicks: 0,
     regenPerTick: 0.3,
@@ -58,12 +92,15 @@ export const COMBAT_TUNING = {
     baselineStat: 50,
     baseHealth: 95,
     baseStamina: 95,
+    baseEndurance: 100,
     primaryStatScale: 0.2,
     secondaryStatScale: 0.05,
     minHealth: 90,
     maxHealth: 110,
     minStamina: 90,
     maxStamina: 110,
+    minEndurance: 90,
+    maxEndurance: 110,
   },
   initial: {
     playerPosition: { x: -1, z: 1 },
@@ -104,6 +141,19 @@ export interface CombatantState {
   maxHealth: number;
   stamina: number;
   maxStamina: number;
+  /** Guard resource. Only blocked hits drain it; it is independent of stamina. */
+  endurance: number;
+  maxEndurance: number;
+  /** Ticks left before endurance starts regenerating again after a blocked hit. */
+  enduranceRegenDelay: number;
+  /** True from the guard-breaking hit until the stagger ends (UI + AI read it). */
+  guardBroken: boolean;
+  /** Which attack profile this combatant swings. Weapons will set this later. */
+  attackProfileId: AttackProfileId;
+  /** Ticks until another attack may start (start-to-start minimum interval). */
+  attackCooldownRemaining: number;
+  /** 0 right after an attack starts, 1 when the next attack is available. */
+  attackCooldownFraction: number;
   currentAction: CurrentAction;
   actionTick: number;
   invulnerable: boolean;
@@ -135,6 +185,8 @@ export type CombatEventType =
   | 'DODGE_EVADED'
   | 'DAMAGE_APPLIED'
   | 'BLOCK_BROKEN'
+  | 'GUARD_BROKEN'
+  | 'ENDURANCE_DEPLETED'
   | 'STAMINA_DEPLETED'
   | 'COMBATANT_DEFEATED';
 
@@ -147,6 +199,8 @@ export interface CombatEvent {
   action?: Exclude<ActionType, 'idle'>;
   amount?: number;
   remaining?: number;
+  /** Endurance removed by a blocked hit (ATTACK_BLOCKED / GUARD_BROKEN). */
+  enduranceDrained?: number;
 }
 
 export interface CombatStepResult { state: CombatState; events: CombatEvent[]; }
@@ -167,7 +221,9 @@ const finiteStat = (value: number): number =>
   Number.isFinite(value) ? value : COMBAT_TUNING.vitals.baselineStat;
 
 /** Derive modest, bounded combat vitals without exposing the fighter's raw hidden stats. */
-export function deriveCombatVitals(hiddenStats: HiddenStats): { maxHealth: number; maxStamina: number } {
+export function deriveCombatVitals(
+  hiddenStats: HiddenStats,
+): { maxHealth: number; maxStamina: number; maxEndurance: number } {
   const tuning = COMBAT_TUNING.vitals;
   const centered = (value: number) => finiteStat(value) - tuning.baselineStat;
   const maxHealth = clamp(
@@ -180,7 +236,12 @@ export function deriveCombatVitals(hiddenStats: HiddenStats): { maxHealth: numbe
     tuning.minStamina,
     tuning.maxStamina,
   );
-  return { maxHealth, maxStamina };
+  const maxEndurance = clamp(
+    Math.round(tuning.baseEndurance + centered(hiddenStats.stamina) * tuning.primaryStatScale + centered(hiddenStats.willpower) * tuning.secondaryStatScale),
+    tuning.minEndurance,
+    tuning.maxEndurance,
+  );
+  return { maxHealth, maxStamina, maxEndurance };
 }
 
 const baselineStats = (): HiddenStats => {
@@ -192,7 +253,7 @@ export function createCombatantState(
   id: CombatantId,
   position: Vec2,
   facing: Vec2,
-  vitals: { maxHealth: number; maxStamina: number },
+  vitals: { maxHealth: number; maxStamina: number; maxEndurance: number },
   stationary = false,
 ): CombatantState {
   return {
@@ -204,6 +265,13 @@ export function createCombatantState(
     maxHealth: vitals.maxHealth,
     stamina: vitals.maxStamina,
     maxStamina: vitals.maxStamina,
+    endurance: vitals.maxEndurance,
+    maxEndurance: vitals.maxEndurance,
+    enduranceRegenDelay: 0,
+    guardBroken: false,
+    attackProfileId: 'basic',
+    attackCooldownRemaining: 0,
+    attackCooldownFraction: 1,
     currentAction: { type: 'idle', phase: 'idle' },
     actionTick: 0,
     invulnerable: false,
@@ -268,6 +336,11 @@ function normalize(vector: Vec2, fallback: Vec2 = { x: 0, z: 0 }): Vec2 {
   return length > 0 ? { x: vector.x / length, z: vector.z / length } : { ...fallback };
 }
 
+/** Every attack number is read through this accessor, never from COMBAT_TUNING.attack directly. */
+export function attackProfileOf(actor: CombatantState): AttackProfile {
+  return COMBAT_TUNING.attackProfiles[actor.attackProfileId] ?? COMBAT_TUNING.attackProfiles.basic;
+}
+
 const vectorTo = (from: CombatantState, to: CombatantState): Vec2 => ({
   x: to.position.x - from.position.x,
   z: to.position.z - from.position.z,
@@ -288,6 +361,11 @@ function setAction(actor: CombatantState, type: Exclude<ActionType, 'idle'>, eve
   actor.currentAction = { type, phase: type === 'stagger' ? 'recovery' : 'startup' };
   actor.actionTick = 0;
   actor.attackConnected = false;
+  if (type === 'attack') {
+    // Measured from the START of the attack, so the interval covers the whole swing.
+    actor.attackCooldownRemaining = Math.max(0, attackProfileOf(actor).minIntervalTicks);
+    actor.attackCooldownFraction = actor.attackCooldownRemaining > 0 ? 0 : 1;
+  }
   events.push({ type: 'ACTION_STARTED', tick, actorId: actor.id, action: type });
 }
 
@@ -335,10 +413,16 @@ function startBufferedAction(
     spendStamina(actor, COMBAT_TUNING.dodge.staminaCost, events, tick);
     return;
   }
-  if (actor.inputBuffer.attackTicks > 0 && actor.stamina >= COMBAT_TUNING.attack.staminaCost) {
+  const profile = attackProfileOf(actor);
+  // The attack cooldown gates only attacks: block and dodge above/below stay available.
+  if (
+    actor.inputBuffer.attackTicks > 0
+    && actor.attackCooldownRemaining <= 0
+    && actor.stamina >= profile.staminaCost
+  ) {
     actor.inputBuffer.attackTicks = 0;
     setAction(actor, 'attack', events, tick);
-    spendStamina(actor, COMBAT_TUNING.attack.staminaCost, events, tick);
+    spendStamina(actor, profile.staminaCost, events, tick);
     return;
   }
   if (input.blockHeld && actor.stamina >= COMBAT_TUNING.block.minimumStartStamina) {
@@ -351,8 +435,9 @@ function phaseFor(actor: CombatantState): ActionPhase {
   const tick = actor.actionTick;
   if (type === 'idle') return 'idle';
   if (type === 'attack') {
-    if (tick < COMBAT_TUNING.attack.startupTicks) return 'startup';
-    if (tick < COMBAT_TUNING.attack.startupTicks + COMBAT_TUNING.attack.activeTicks) return 'active';
+    const profile = attackProfileOf(actor);
+    if (tick < profile.startupTicks) return 'startup';
+    if (tick < profile.startupTicks + profile.activeTicks) return 'active';
     return 'recovery';
   }
   if (type === 'dodge') {
@@ -382,9 +467,10 @@ function prepareAction(actor: CombatantState, input: CombatInput): void {
 
 function movementMultiplier(actor: CombatantState): number {
   if (actor.currentAction.type === 'attack') {
-    if (actor.currentAction.phase === 'startup') return COMBAT_TUNING.attack.startupMovementMultiplier;
-    if (actor.currentAction.phase === 'active') return COMBAT_TUNING.attack.activeMovementMultiplier;
-    return COMBAT_TUNING.attack.recoveryMovementMultiplier;
+    const profile = attackProfileOf(actor);
+    if (actor.currentAction.phase === 'startup') return profile.startupMovementMultiplier;
+    if (actor.currentAction.phase === 'active') return profile.activeMovementMultiplier;
+    return profile.recoveryMovementMultiplier;
   }
   if (actor.currentAction.type === 'block') return COMBAT_TUNING.block.movementMultiplier;
   if (actor.currentAction.type === 'dodge') return actor.currentAction.phase === 'active'
@@ -427,12 +513,29 @@ function moveCombatant(actor: CombatantState, input: CombatInput, bounds: Combat
   };
 }
 
-function breakBlock(target: CombatantState, events: CombatEvent[], tick: number, attacker: CombatantState): void {
+/**
+ * Guard break: endurance hit zero. The defender staggers, cannot act, and takes full damage
+ * from everything until the stagger ends; endurance is restored to a fraction of max then.
+ */
+function breakGuard(
+  target: CombatantState,
+  events: CombatEvent[],
+  tick: number,
+  attacker: CombatantState,
+  enduranceDrained: number,
+): void {
+  target.endurance = 0;
+  target.guardBroken = true;
+  target.enduranceRegenDelay = COMBAT_TUNING.block.enduranceRegenDelayTicks;
   target.currentAction = { type: 'stagger', phase: 'recovery' };
   target.actionTick = 0;
   target.invulnerable = false;
-  // The block break is the only event that delays regeneration beyond the action itself.
+  target.inputBuffer = { attackTicks: 0, dodgeTicks: 0 };
+  // The guard break is the only event that delays stamina regeneration beyond the action itself.
   target.staminaRegenDelay = COMBAT_TUNING.stamina.regenDelayTicks;
+  events.push({ type: 'ENDURANCE_DEPLETED', tick, actorId: target.id, remaining: 0 });
+  events.push({ type: 'GUARD_BROKEN', tick, actorId: target.id, targetId: attacker.id, enduranceDrained });
+  // BLOCK_BROKEN is kept as the compatible alias for existing listeners.
   events.push({ type: 'BLOCK_BROKEN', tick, actorId: target.id, targetId: attacker.id });
 }
 
@@ -461,9 +564,10 @@ function finalizeDefeat(actor: CombatantState): void {
 function resolveAttack(attacker: CombatantState, target: CombatantState, events: CombatEvent[], tick: number): void {
   if (attacker.currentAction.type !== 'attack' || attacker.currentAction.phase !== 'active' || attacker.attackConnected) return;
 
+  const profile = attackProfileOf(attacker);
   const towardTarget = vectorTo(attacker, target);
-  const inRange = Math.hypot(towardTarget.x, towardTarget.z) <= COMBAT_TUNING.attack.range;
-  const inArc = isInsideFacingArc(attacker.facing, towardTarget, COMBAT_TUNING.attack.arcDegrees);
+  const inRange = Math.hypot(towardTarget.x, towardTarget.z) <= profile.range;
+  const inArc = isInsideFacingArc(attacker.facing, towardTarget, profile.arcDegrees);
   if (inRange && inArc && !target.defeated) {
     attacker.attackConnected = true;
     if (target.invulnerable) {
@@ -476,32 +580,48 @@ function resolveAttack(attacker: CombatantState, target: CombatantState, events:
       && target.currentAction.phase === 'active'
       && incomingFromFront;
     const lowStamina = attacker.stamina / attacker.maxStamina <= COMBAT_TUNING.lowStaminaThreshold;
-    const baseDamage = COMBAT_TUNING.attack.damage
-      * (lowStamina ? COMBAT_TUNING.attack.lowStaminaDamageMultiplier : 1);
+    const baseDamage = profile.damage * (lowStamina ? profile.lowStaminaDamageMultiplier : 1);
 
-    if (blocking && target.stamina >= COMBAT_TUNING.block.staminaPerHit) {
-      spendStamina(target, COMBAT_TUNING.block.staminaPerHit, events, tick);
-      const damage = baseDamage * (1 - COMBAT_TUNING.block.damageReduction);
-      events.push({ type: 'ATTACK_BLOCKED', tick, actorId: attacker.id, targetId: target.id, amount: damage });
-      applyDamage(attacker, target, damage, events, tick);
-      return;
+    if (blocking) {
+      const block = COMBAT_TUNING.block;
+      const drain = baseDamage * block.enduranceDrainPerDamage;
+      // Blocking costs endurance, never stamina. Reaching zero is a guard break.
+      target.enduranceRegenDelay = block.enduranceRegenDelayTicks;
+      if (target.endurance - drain > 0) {
+        target.endurance -= drain;
+        const chip = baseDamage * block.blockChipFraction;
+        events.push({
+          type: 'ATTACK_BLOCKED',
+          tick,
+          actorId: attacker.id,
+          targetId: target.id,
+          amount: chip,
+          remaining: target.endurance,
+          enduranceDrained: drain,
+        });
+        if (chip > 0) applyDamage(attacker, target, chip, events, tick);
+        return;
+      }
+      breakGuard(target, events, tick, attacker, Math.min(drain, target.endurance));
     }
-    if (blocking) breakBlock(target, events, tick, attacker);
     events.push({ type: 'ATTACK_HIT', tick, actorId: attacker.id, targetId: target.id, amount: baseDamage });
     applyDamage(attacker, target, baseDamage, events, tick);
     return;
   }
 
-  const finalActiveTick = COMBAT_TUNING.attack.startupTicks + COMBAT_TUNING.attack.activeTicks - 1;
+  const finalActiveTick = profile.startupTicks + profile.activeTicks - 1;
   if (attacker.actionTick === finalActiveTick) {
     events.push({ type: 'ATTACK_MISSED', tick, actorId: attacker.id, targetId: target.id });
   }
 }
 
-function actionTotalTicks(type: ActionType): number {
-  if (type === 'attack') return COMBAT_TUNING.attack.startupTicks + COMBAT_TUNING.attack.activeTicks + COMBAT_TUNING.attack.recoveryTicks;
+function actionTotalTicks(type: ActionType, actor: CombatantState): number {
+  if (type === 'attack') {
+    const profile = attackProfileOf(actor);
+    return profile.startupTicks + profile.activeTicks + profile.recoveryTicks;
+  }
   if (type === 'dodge') return COMBAT_TUNING.dodge.startupTicks + COMBAT_TUNING.dodge.activeTicks + COMBAT_TUNING.dodge.recoveryTicks;
-  if (type === 'stagger') return COMBAT_TUNING.block.breakStaggerTicks;
+  if (type === 'stagger') return COMBAT_TUNING.block.guardBreakStaggerTicks;
   if (type === 'block') return COMBAT_TUNING.block.recoveryTicks;
   return 0;
 }
@@ -511,9 +631,14 @@ function finishOrAdvanceAction(actor: CombatantState): void {
   actor.actionTick += 1;
   const type = actor.currentAction.type;
   const finished = type === 'block'
-    ? actor.currentAction.phase === 'recovery' && actor.actionTick >= actionTotalTicks(type)
-    : actor.actionTick >= actionTotalTicks(type);
+    ? actor.currentAction.phase === 'recovery' && actor.actionTick >= actionTotalTicks(type, actor)
+    : actor.actionTick >= actionTotalTicks(type, actor);
   if (finished) {
+    if (type === 'stagger' && actor.guardBroken) {
+      // Endurance comes back at a fraction of max once the stagger is over.
+      actor.guardBroken = false;
+      actor.endurance = actor.maxEndurance * COMBAT_TUNING.block.guardBreakResetRatio;
+    }
     actor.currentAction = { type: 'idle', phase: 'idle' };
     actor.actionTick = 0;
     actor.attackConnected = false;
@@ -550,6 +675,31 @@ function regenerateStamina(actor: CombatantState, actionThisTick: CurrentAction)
     return;
   }
   actor.stamina = Math.min(actor.maxStamina, actor.stamina + COMBAT_TUNING.stamina.regenPerTick);
+}
+
+/**
+ * Endurance recovers only after `enduranceRegenDelayTicks` ticks without a blocked hit. It does
+ * not care whether block is held; it is paused only while the guard-break stagger runs, because
+ * the stagger restores endurance to a fixed ratio when it ends.
+ */
+function regenerateEndurance(actor: CombatantState): void {
+  if (actor.defeated || actor.guardBroken) return;
+  if (actor.enduranceRegenDelay > 0) {
+    actor.enduranceRegenDelay -= 1;
+    return;
+  }
+  actor.endurance = Math.min(
+    actor.maxEndurance,
+    actor.endurance + COMBAT_TUNING.block.enduranceRegenPerTick,
+  );
+}
+
+function tickAttackCooldown(actor: CombatantState): void {
+  const interval = Math.max(0, attackProfileOf(actor).minIntervalTicks);
+  actor.attackCooldownRemaining = Math.max(0, actor.attackCooldownRemaining - 1);
+  actor.attackCooldownFraction = interval <= 0
+    ? 1
+    : Math.min(1, Math.max(0, 1 - actor.attackCooldownRemaining / interval));
 }
 
 function decrementBuffers(actor: CombatantState): void {
@@ -609,6 +759,8 @@ export function stepCombatantPair(state: CombatState, inputs: CombatInputPair): 
     const actionThisTick: CurrentAction = { ...actor.currentAction };
     finishOrAdvanceAction(actor);
     regenerateStamina(actor, actionThisTick);
+    regenerateEndurance(actor);
+    tickAttackCooldown(actor);
     decrementBuffers(actor);
   }
   return { state: next, events };
