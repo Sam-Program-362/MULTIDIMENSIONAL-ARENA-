@@ -1,15 +1,19 @@
 import {
+  AiState,
   CombatEvent,
   CombatInput,
   CombatState,
   Fighter,
   FighterInput,
+  createAiState,
   createCombatState,
   createFighter,
+  createOpponentCombatState,
   describeCondition,
   joystickInput,
   joystickKnobOffset,
   stepCombat,
+  stepCombatWithAi,
   ticksForElapsed,
 } from '../sim';
 import { browserStorage } from '../storage';
@@ -79,13 +83,16 @@ export function renderProfile(fighter: Fighter): void {
 
 const arenaMarkup = (fighterName: string): string => `<main class="arena-screen">
   <button class="leave" id="leave">Leave</button>
+  <div class="opponent-toggle" role="group" aria-label="Training target">
+    <button data-mode="dummy" aria-pressed="false">Dummy</button><button data-mode="opponent" class="selected" aria-pressed="true">Opponent</button>
+  </div>
   <canvas id="arena-canvas" aria-label="Combat training arena"></canvas>
   <!-- Debug-only combat HUD: remove this component without touching simulation or canvas code. -->
   <aside class="debug-combat-hud" aria-label="Combat status">
     <div class="hud-fighter" data-hud="player"><div class="hud-label"><strong>${escapeHtml(fighterName)}</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
-    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong>Training Dummy</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
+    <div class="hud-fighter hud-dummy" data-hud="dummy"><div class="hud-label"><strong data-opponent-label>Rookie Opponent</strong><span data-value="health"></span></div><div class="meter health"><i data-bar="health"></i></div><div class="hud-label stamina-label"><span>Stamina</span><span data-value="stamina"></span></div><div class="meter stamina"><i data-bar="stamina"></i></div></div>
   </aside>
-  <div class="fight-result" id="fight-result" hidden><strong>Dummy defeated</strong><span>Training complete.</span><button class="primary" id="reset-fight">Reset</button></div>
+  <div class="fight-result" id="fight-result" hidden><strong data-result-title>Opponent defeated</strong><span data-result-detail>Sparring complete.</span><button class="primary" id="reset-fight">Reset</button></div>
   <div class="joystick" id="joystick" aria-label="Movement joystick"><div class="stick"></div></div>
   <div class="combat-controls" aria-label="Combat controls">
     <button class="combat-button attack-button" data-control="attack" aria-label="Attack">Attack<kbd>J</kbd></button>
@@ -107,6 +114,10 @@ export function renderArena(): void {
   const pad = root.querySelector<HTMLElement>('#joystick')!;
   const stick = pad.querySelector<HTMLElement>('.stick')!;
   const resultPanel = root.querySelector<HTMLElement>('#fight-result')!;
+  const resultTitle = resultPanel.querySelector<HTMLElement>('[data-result-title]')!;
+  const resultDetail = resultPanel.querySelector<HTMLElement>('[data-result-detail]')!;
+  const opponentLabel = root.querySelector<HTMLElement>('[data-opponent-label]')!;
+  const modeButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mode]'));
   const actionButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-control]'));
   const cleanup: Array<() => void> = [];
   const on = <K extends keyof WindowEventMap>(target: Window, type: K, listener: (event: WindowEventMap[K]) => void) => {
@@ -114,7 +125,10 @@ export function renderArena(): void {
     cleanup.push(() => target.removeEventListener(type, listener as EventListener));
   };
 
-  let state = createCombatState(fighter.hiddenStats);
+  type ArenaMode = 'dummy' | 'opponent';
+  let mode: ArenaMode = 'opponent';
+  let state = createOpponentCombatState(fighter.hiddenStats);
+  let aiState: AiState = createAiState(fighter.meta.seed, state.player);
   let accumulator = 0;
   let last = performance.now();
   let frame = 0;
@@ -278,7 +292,18 @@ export function renderArena(): void {
   const updateHud = () => {
     updateHudCombatant('player', state.player);
     updateHudCombatant('dummy', state.dummy);
-    resultPanel.hidden = !state.dummy.defeated;
+    opponentLabel.textContent = mode === 'opponent' ? 'Rookie Opponent' : 'Training Dummy';
+    resultPanel.hidden = !state.fightOver;
+    if (state.winner === 'player') {
+      resultTitle.textContent = mode === 'opponent' ? 'Opponent defeated' : 'Dummy defeated';
+      resultDetail.textContent = mode === 'opponent' ? 'Sparring complete.' : 'Training complete.';
+    } else if (state.winner === 'dummy') {
+      resultTitle.textContent = 'You were defeated';
+      resultDetail.textContent = 'Reset when you are ready.';
+    } else if (state.winner === 'draw') {
+      resultTitle.textContent = 'Double defeat';
+      resultDetail.textContent = 'Both combatants fell.';
+    }
   };
 
   const project = (position: { x: number; z: number }) => {
@@ -309,7 +334,8 @@ export function renderArena(): void {
       ctx.stroke();
     }
 
-    ctx.fillStyle = flash ? '#ffffff' : combatant.defeated ? '#55586a' : isPlayer ? '#b9adff' : '#ffb56b';
+    const secondCombatantColor = mode === 'opponent' ? '#ff7187' : '#ffb56b';
+    ctx.fillStyle = flash ? '#ffffff' : combatant.defeated ? '#55586a' : isPlayer ? '#b9adff' : secondCombatantColor;
     ctx.beginPath();
     if (combatant.defeated) ctx.ellipse(point.x, point.y + 4, 22, 8, -0.18, 0, Math.PI * 2);
     else ctx.arc(point.x, point.y, isPlayer ? 13 : 15, 0, Math.PI * 2);
@@ -318,7 +344,7 @@ export function renderArena(): void {
     if (!combatant.defeated) {
       const facingEndX = point.x + combatant.facing.x * 26;
       const facingEndY = point.y + combatant.facing.z * 15;
-      ctx.strokeStyle = isPlayer ? '#ded8ff' : '#ffe0bc';
+      ctx.strokeStyle = isPlayer ? '#ded8ff' : mode === 'opponent' ? '#ffd0d8' : '#ffe0bc';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(point.x, point.y);
@@ -366,16 +392,32 @@ export function renderArena(): void {
   };
 
   const resetFight = () => {
-    state = createCombatState(fighter.hiddenStats);
+    state = mode === 'opponent'
+      ? createOpponentCombatState(fighter.hiddenStats)
+      : createCombatState(fighter.hiddenStats);
+    aiState = createAiState(fighter.meta.seed, state.player);
     accumulator = 0;
     last = performance.now();
     clearHeldInput();
     flashTicks.player = flashTicks.dummy = 0;
     blockFlashTicks.player = blockFlashTicks.dummy = 0;
     dodgeFlashTicks.player = dodgeFlashTicks.dummy = 0;
+    for (const button of modeButtons) {
+      const selected = button.dataset.mode === mode;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    }
     draw();
   };
   root.querySelector('#reset-fight')!.addEventListener('click', resetFight);
+  for (const button of modeButtons) {
+    button.addEventListener('click', () => {
+      const selectedMode = button.dataset.mode;
+      if (selectedMode !== 'dummy' && selectedMode !== 'opponent') return;
+      mode = selectedMode;
+      resetFight();
+    });
+  }
 
   const leave = () => {
     cancelAnimationFrame(frame);
@@ -399,9 +441,16 @@ export function renderArena(): void {
       };
       attackQueued = false;
       dodgeQueued = false;
-      const result = stepCombat(state, input);
-      state = result.state;
-      handleEvents(result.events);
+      if (mode === 'opponent') {
+        const result = stepCombatWithAi(state, input, aiState);
+        state = result.state;
+        aiState = result.aiState;
+        handleEvents(result.events);
+      } else {
+        const result = stepCombat(state, input);
+        state = result.state;
+        handleEvents(result.events);
+      }
       flashTicks.player = Math.max(0, flashTicks.player - 1);
       flashTicks.dummy = Math.max(0, flashTicks.dummy - 1);
       blockFlashTicks.player = Math.max(0, blockFlashTicks.player - 1);
