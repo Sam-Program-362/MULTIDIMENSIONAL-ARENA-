@@ -20,11 +20,21 @@ Exposure: `whiffExposure 30`, `blockedExposure 35`, `hitExposure 5`, `maxExposur
 `decayDelayTicks 60`, `decayPerTick 0.25`, `exposedTicks 75`, `exposureDamageBonus 0.75`,
 `exposedResetRatio 0.25`.
 
-Veteran profile: `reactionTicks 13`, `decisionIntervalTicks 8`, `aggression 0.70`,
-`mistakeChance 0.05`, `punishChance 0.90`, `retreatTicks 0`, `restraintExposureRatio 0.70`.
-Pattern weights: pressure `0.72`, rhythm break `0.34`, counter-guard `0.78`, rhythm-break chance
-`0.38`; desperation health ratio `0.30`. Other inherited movement/resource values are visible in
-`VETERAN_PROFILE` and continue through shared rules.
+Complete final `VETERAN_PROFILE` values:
+
+```text
+tier veteran; reactionTicks 13; decisionIntervalTicks 8; aggression 0.70; caution 0.62;
+mistakeChance 0.05; preferredRange 1.65; rangeTolerance 0.25; mistakeRangeMargin 0.55;
+defenseRangeMargin 0.45; retreatStaminaRatio 0.22; retreatResumeStaminaRatio 0.48;
+retreatTicks 0; approachStrength 0.9; retreatStrength 0.8; sidestepStrength 0.3;
+spacingStrength 0.42; dodgeShare 0.34; normalBlockHoldTicks 16; mistakeBlockHoldTicks 24;
+overcommitWindowTicks 6; wallBuffer 0.35; circleSwitchChance 0.08; guardChance 0.48;
+guardHoldTicksMin 10; guardHoldTicksMax 22; guardGapTicks 8; guardReleaseObservations 2;
+minEnduranceRatioToGuard 0.25; punishChance 0.90; restraintExposureRatio 0.70;
+dashCloseDistance 4.5; dashCloseChance 0.60; dashMinStaminaRatio 0.35;
+pressureWeight 0.72; rhythmBreakWeight 0.34; counterGuardWeight 0.78;
+rhythmBreakChance 0.38; desperationHealthRatio 0.30.
+```
 
 ## Benchmark comparison
 
@@ -343,6 +353,7 @@ docs/decisions/007-block-facing-guard-recovery-and-ai-spacing.md
 docs/decisions/008-exposure-anti-spam.md
 docs/decisions/009-veteran-ai-patterns.md
 docs/development-log.md
+docs/implementation-report-phase-1c5.md
 docs/roadmap.md
 docs/vision.md
 index.html
